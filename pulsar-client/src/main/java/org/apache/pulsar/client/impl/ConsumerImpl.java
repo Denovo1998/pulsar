@@ -2552,6 +2552,17 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 && ((MessageIdImpl) lastMessageIdInBroker).getEntryId() != -1;
     }
 
+    @Override
+    public void acknowledge(byte[] replyPayload, boolean isErrorMessage,
+                            MessageId messageId) throws PulsarClientException {
+        return;
+    }
+
+    @Override
+    public CompletableFuture<Void> acknowledgeAsync(byte[] replyPayload, boolean isErrorMessage, MessageId messageId) {
+        return null;
+    }
+
     private static final class GetLastMessageIdResponse {
         final MessageId lastMessageId;
         final MessageId markDeletePosition;

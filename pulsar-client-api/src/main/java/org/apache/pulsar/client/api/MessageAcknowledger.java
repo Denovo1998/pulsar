@@ -73,6 +73,25 @@ public interface MessageAcknowledger {
     }
 
     /**
+     * Acknowledge the consumption of a single message, and carry ReplyMessage content.
+     *
+     * @param replyPayload Results returned by the application after the message has been processed
+     * @param isErrorMessage Whether a reply result contains an error.
+     * @param messageId {@link MessageId} to be individual acknowledged
+     *
+     * @throws PulsarClientException.AlreadyClosedException}
+     *             if the consumer was already closed
+     * @throws PulsarClientException.NotAllowedException
+     *             if `messageId` is not a {@link TopicMessageId} when multiple topics are subscribed
+     */
+    void acknowledge(byte[] replyPayload, boolean isErrorMessage, MessageId messageId) throws PulsarClientException;
+
+    default void acknowledge(byte[] replyPayload, boolean isErrorMessage,
+                             Message<?> message) throws PulsarClientException {
+        acknowledge(replyPayload, isErrorMessage, message.getMessageId());
+    }
+
+    /**
      * Acknowledge the reception of all the messages in the stream up to (and including) the provided message.
      *
      * <p>This method will block until the acknowledge has been sent to the broker. After that, the messages will not be
@@ -131,6 +150,11 @@ public interface MessageAcknowledger {
      * The asynchronous version of {@link #acknowledge(Messages)} with transaction support.
      */
     CompletableFuture<Void> acknowledgeAsync(Messages<?> messages, Transaction txn);
+
+    /**
+     * The asynchronous version of {@link #acknowledge(byte[], boolean, MessageId)} with transaction support.
+     */
+    CompletableFuture<Void> acknowledgeAsync(byte[] replyPayload, boolean isErrorMessage, MessageId messageId);
 
     /**
      * The asynchronous version of {@link #acknowledgeCumulative(MessageId)} with transaction support.

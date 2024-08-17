@@ -581,6 +581,8 @@ message CommandAck {
     optional uint64 txnid_least_bits = 6 [default = 0];
     optional uint64 txnid_most_bits = 7 [default = 0];
     optional uint64 request_id = 8;
+
+    optional string reply_to_client = 9;
 }
 
 message CommandAckResponse {
@@ -960,6 +962,11 @@ message CommandEndTxnOnSubscriptionResponse {
     optional string message = 5;
 }
 
+message CommandRequestReceipt {
+    required uint64 reply_to_producer_id    = 1;
+    optional MessageIdData request_message_id = 2;
+}
+
 message BaseCommand {
     enum Type {
         CONNECT     = 2;
@@ -1051,6 +1058,7 @@ message BaseCommand {
         WATCH_TOPIC_LIST_CLOSE = 67;
 
         TOPIC_MIGRATED = 68;
+        REQUEST_RECEIPT = 69;
     }
 
 
@@ -1134,4 +1142,5 @@ message BaseCommand {
     optional CommandWatchTopicListClose watchTopicListClose = 67;
     
     optional CommandTopicMigrated topicMigrated = 68;
+    optional CommandRequestReceipt requestReceipt = 69;
 }

@@ -69,6 +69,7 @@ import org.apache.pulsar.common.api.proto.CommandProducer;
 import org.apache.pulsar.common.api.proto.CommandProducerSuccess;
 import org.apache.pulsar.common.api.proto.CommandReachedEndOfTopic;
 import org.apache.pulsar.common.api.proto.CommandRedeliverUnacknowledgedMessages;
+import org.apache.pulsar.common.api.proto.CommandRequestReceipt;
 import org.apache.pulsar.common.api.proto.CommandSeek;
 import org.apache.pulsar.common.api.proto.CommandSend;
 import org.apache.pulsar.common.api.proto.CommandSendError;
@@ -478,6 +479,11 @@ public abstract class PulsarDecoder extends ChannelInboundHandlerAdapter {
                 handleCommandWatchTopicListClose(cmd.getWatchTopicListClose());
                 break;
 
+            case REQUEST_RECEIPT:
+                checkArgument(cmd.hasRequestReceipt());
+                handleCommandRequestReceipt(cmd.getRequestReceipt(), buffer);
+                break;
+
             default:
                 break;
             }
@@ -736,6 +742,10 @@ public abstract class PulsarDecoder extends ChannelInboundHandlerAdapter {
     }
 
     protected void handleCommandWatchTopicListClose(CommandWatchTopicListClose commandWatchTopicListClose) {
+        throw new UnsupportedOperationException();
+    }
+
+    protected void handleCommandRequestReceipt(CommandRequestReceipt commandRequestReceipt, ByteBuf replyPayload) {
         throw new UnsupportedOperationException();
     }
 

@@ -115,7 +115,9 @@ import org.apache.pulsar.common.api.proto.MessageMetadata;
 import org.apache.pulsar.common.api.proto.SingleMessageMetadata;
 import org.apache.pulsar.common.compression.CompressionCodec;
 import org.apache.pulsar.common.compression.CompressionCodecProvider;
+import org.apache.pulsar.common.naming.Constants;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.policies.data.DelayedDeliveryPolicies;
 import org.apache.pulsar.common.policies.data.PublisherStats;
 import org.apache.pulsar.common.policies.data.TopicStats;
 import org.apache.pulsar.common.protocol.Commands;
@@ -4877,5 +4879,93 @@ public class SimpleProducerConsumerTest extends ProducerConsumerBase {
         } else {
             return 0;
         }
+    }
+
+    @Test
+    public void testRPCCallMode() throws Exception {
+        // ProducerInterceptor rpcInterceptor = new ProducerInterceptor(){
+        //     @Override
+        //     public void close() {
+        //
+        //     }
+        //
+        //     @Override
+        //     public Message beforeSend(Producer producer, Message message) {
+        //         return message;
+        //     }
+        //
+        //     @Override
+        //     public void onSendAcknowledgement(Producer producer, Message message, MessageId msgId, Throwable exception) {
+        //
+        //     }
+        //
+        //     @Override
+        //     public void onReceiveReplyMessage(Producer producer, Message message, MessageId msgId,
+        //                                       Throwable exception) {
+        //
+        //     }
+        // };
+
+        final String topic = "persistent://my-property/my-ns/testRPCCallMode";
+        final long rpcTTL = 3000;
+
+        @Cleanup
+        Producer<byte[]> producer = pulsarClient.newProducer().topic(topic).enableBatching(false)
+                // .intercept(rpcInterceptor)
+                .producerName("requestClient")
+                .create();
+
+        final String REPLY_CONTENT_PREFIX = "reply message content: ";
+        final String REPLY_ERROR_PREFIX = "reply error: ";
+        @Cleanup
+        Consumer<byte[]> consumer1 = pulsarClient.newConsumer().topic(topic)
+                .subscriptionType(SubscriptionType.Shared)
+                .consumerName("consumer1")
+                .messageListener((consumer, receivedMsg) -> {
+                    if (receivedMsg.hasProperty(Constants.REQUEST_TIMEOUT_MILLIS) &&
+                            System.currentTimeMillis() >= receivedMsg.getPublishTime() +
+                            Long.parseLong(receivedMsg.getProperty(Constants.REQUEST_TIMEOUT_MILLIS))) {
+                        consumer.acknowledgeAsync(receivedMsg);
+                        return;
+                    }
+
+                    try {
+                        // Do your custom processing here.
+                        // process(receivedMsg);
+
+                        if (receivedMsg.hasProperty(Constants.REQUEST_TIMEOUT_MILLIS) &&
+                                System.currentTimeMillis() >= receivedMsg.getPublishTime() +
+                                        Long.parseLong(receivedMsg.getProperty(Constants.REQUEST_TIMEOUT_MILLIS))) {
+                            // Call your own implemented rollback here.
+                            // rollBack(receivedMsg);
+                            consumer.acknowledgeAsync(receivedMsg);
+                            return;
+                        }
+
+                        String receivedMessage = new String(receivedMsg.getData());
+                        log.info("Received message [{}] in the listener", receivedMessage);
+                        byte[] replyPayload = (REPLY_CONTENT_PREFIX + receivedMessage).getBytes(UTF_8);
+                        consumer.acknowledgeAsync(replyPayload, false, receivedMsg.getMessageId());
+                    } catch (Exception e) {
+                        byte[] replyErrorPayload = (REPLY_ERROR_PREFIX + e.getCause()).getBytes(UTF_8);
+                        consumer.acknowledgeAsync(replyErrorPayload, true, receivedMsg.getMessageId());
+                    }
+                }).subscribe();
+
+        // 1.Synchronous Send.
+        ReplyResult replyResult = producer.newMessage().value("SynchronousRequest1".getBytes(UTF_8))
+                .request(rpcTTL, TimeUnit.MILLISECONDS);
+        log.info("ReplyResult: " + replyResult);
+
+        // 2.Asynchronous Send.
+        producer.newMessage().value("AsynchronousRequest1".getBytes(UTF_8))
+                .requestAsync(rpcTTL, TimeUnit.MILLISECONDS)
+                .whenComplete((replyMessage, e) -> {
+                    if (e != null) {
+                        log.error("error", e);
+                    } else {
+                        log.info("Reply message: " + replyMessage);
+                    }
+                });
     }
 }

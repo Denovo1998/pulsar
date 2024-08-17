@@ -16,15 +16,19 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.pulsar.common.naming;
+package org.apache.pulsar.client.api;
 
-/**
- * Definition of constants.
- */
-public class Constants {
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.ToString;
 
-    public static final String GLOBAL_CLUSTER = "global";
-    public static final String REQUEST_TIMEOUT_MILLIS = "requestTimeoutInMillis";
-
-    private Constants() {}
+@Getter
+@ToString
+@AllArgsConstructor
+public class ReplyResult {
+    // request message MessageId
+    MessageId requestMessageId;
+    // reply result
+    byte[] replyContent;
+    boolean isErrorResult;
 }

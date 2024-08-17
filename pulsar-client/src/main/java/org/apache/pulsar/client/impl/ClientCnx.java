@@ -91,6 +91,7 @@ import org.apache.pulsar.common.api.proto.CommandNewTxnResponse;
 import org.apache.pulsar.common.api.proto.CommandPartitionedTopicMetadataResponse;
 import org.apache.pulsar.common.api.proto.CommandProducerSuccess;
 import org.apache.pulsar.common.api.proto.CommandReachedEndOfTopic;
+import org.apache.pulsar.common.api.proto.CommandRequestReceipt;
 import org.apache.pulsar.common.api.proto.CommandSendError;
 import org.apache.pulsar.common.api.proto.CommandSendReceipt;
 import org.apache.pulsar.common.api.proto.CommandSuccess;
@@ -888,6 +889,22 @@ public class ClientCnx extends PulsarHandler {
             log.warn("[{}] Invalid redirect URL {}, requestId {}: ", remoteAddress, url, requestId, e);
         }
         return Optional.empty();
+    }
+
+    @Override
+    protected void handleCommandRequestReceipt(CommandRequestReceipt requestReceipt, ByteBuf replyPayload) {
+        checkArgument(state == State.Ready);
+
+        long ledgerId = -1;
+        long entryId = -1;
+        if (requestReceipt.hasRequestMessageId()) {
+            ledgerId = requestReceipt.getRequestMessageId().getLedgerId();
+            entryId = requestReceipt.getRequestMessageId().getEntryId();
+        }
+        ProducerImpl<?> producer = producers.get(requestReceipt.getReplyToProducerId());
+        if (producer != null) {
+            producer.replyReceived(ledgerId, entryId, replyPayload);
+        }
     }
 
     @Override
