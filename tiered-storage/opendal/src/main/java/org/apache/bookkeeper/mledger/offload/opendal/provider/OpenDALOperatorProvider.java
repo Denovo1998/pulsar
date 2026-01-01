@@ -28,6 +28,10 @@ import org.apache.opendal.ServiceConfig;
 @RequiredArgsConstructor
 public class OpenDALOperatorProvider {
 
+    private static final String GCS_SERVICE_ACCOUNT_KEY_FILE = "gcsManagedLedgerOffloadServiceAccountKeyFile";
+    private static final String ENV_AZURE_STORAGE_ACCOUNT = "AZURE_STORAGE_ACCOUNT";
+    private static final String ENV_AZURE_STORAGE_ACCESS_KEY = "AZURE_STORAGE_ACCESS_KEY";
+
     private final OpenDALTieredStorageConfiguration config;
     private final OperatorCache operatorCache;
 
@@ -124,6 +128,20 @@ public class OpenDALOperatorProvider {
         if (StringUtils.isNotBlank(endpoint)) {
             builder.endpoint(endpoint);
         }
+
+        // Keep compatibility with tiered-storage-jcloud: allow providing the service account key via file path.
+        // If users explicitly pass credential settings via managedLedgerOffloadExtraConfig*, prefer those.
+        Map<String, String> extra = config.getExtraConfig();
+        boolean hasExplicitCredential = extra.containsKey("credential")
+                || extra.containsKey("credential_path")
+                || extra.containsKey("service_account")
+                || extra.containsKey("token");
+        if (!hasExplicitCredential) {
+            String keyFilePath = StringUtils.trimToNull(config.getConfigProperties().get(GCS_SERVICE_ACCOUNT_KEY_FILE));
+            if (keyFilePath != null) {
+                builder.credentialPath(keyFilePath);
+            }
+        }
         return builder.build().configMap();
     }
 
@@ -135,6 +153,23 @@ public class OpenDALOperatorProvider {
         ServiceConfig.Azblob.AzblobBuilder builder = ServiceConfig.Azblob.builder().container(container);
         if (StringUtils.isNotBlank(endpoint)) {
             builder.endpoint(endpoint);
+        }
+
+        // Keep compatibility with tiered-storage-jcloud: by default Azure credentials are sourced from env vars.
+        // Users can override by passing managedLedgerOffloadExtraConfigaccountName/accountKey/sasToken, etc.
+        Map<String, String> extra = config.getExtraConfig();
+        boolean hasAccountName = extra.containsKey("account_name");
+        boolean hasAccountKey = extra.containsKey("account_key");
+        boolean hasSasToken = extra.containsKey("sas_token");
+
+        String accountName = StringUtils.trimToNull(System.getenv(ENV_AZURE_STORAGE_ACCOUNT));
+        String accountKey = StringUtils.trimToNull(System.getenv(ENV_AZURE_STORAGE_ACCESS_KEY));
+        if (!hasAccountName && accountName != null) {
+            builder.accountName(accountName);
+        }
+        // Don't apply account key when SAS auth is explicitly configured.
+        if (!hasSasToken && !hasAccountKey && accountKey != null) {
+            builder.accountKey(accountKey);
         }
         return builder.build().configMap();
     }
