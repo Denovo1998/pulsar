@@ -86,11 +86,6 @@ public class TestGcsOffload extends TestBaseOffload {
         result.put("gcsManagedLedgerOffloadServiceEndpoint",
                 "http://" + GcsContainer.NAME + ":" + GcsContainer.PORT);
 
-        // Emulator-friendly settings. All of these are passed through to OpenDAL via extra config.
-        result.put("managedLedgerOffloadExtraConfigallowAnonymous", "true");
-        result.put("managedLedgerOffloadExtraConfigdisableConfigLoad", "true");
-        result.put("managedLedgerOffloadExtraConfigdisableVmMetadata", "true");
-
         return result;
     }
 
@@ -113,4 +108,3 @@ public class TestGcsOffload extends TestBaseOffload {
         }
     }
 }
-

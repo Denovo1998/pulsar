@@ -136,10 +136,24 @@ public class OpenDALOperatorProvider {
                 || extra.containsKey("credential_path")
                 || extra.containsKey("service_account")
                 || extra.containsKey("token");
+        boolean isHttpEndpoint = endpoint != null && endpoint.regionMatches(true, 0, "http://", 0, "http://".length());
+        String keyFilePath = StringUtils.trimToNull(config.getConfigProperties().get(GCS_SERVICE_ACCOUNT_KEY_FILE));
         if (!hasExplicitCredential) {
-            String keyFilePath = StringUtils.trimToNull(config.getConfigProperties().get(GCS_SERVICE_ACCOUNT_KEY_FILE));
             if (keyFilePath != null) {
                 builder.credentialPath(keyFilePath);
+            } else if (isHttpEndpoint) {
+                // Emulator-friendly defaults:
+                // - Fake GCS server typically does not require auth.
+                // - Disable local config load / VM metadata to avoid slow fallbacks when running in containers.
+                if (!extra.containsKey("allow_anonymous")) {
+                    builder.allowAnonymous(true);
+                }
+                if (!extra.containsKey("disable_config_load")) {
+                    builder.disableConfigLoad(true);
+                }
+                if (!extra.containsKey("disable_vm_metadata")) {
+                    builder.disableVmMetadata(true);
+                }
             }
         }
         return builder.build().configMap();
