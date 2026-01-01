@@ -40,7 +40,7 @@
     </file>
 
     <file>
-      <source>${basedir}/../../tiered-storage/jcloud/target/tiered-storage-jcloud-${project.version}.nar</source>
+      <source>${basedir}/../../tiered-storage/opendal/target/tiered-storage-opendal-${project.version}.nar</source>
       <outputDirectory>offloaders</outputDirectory>
       <fileMode>644</fileMode>
     </file>

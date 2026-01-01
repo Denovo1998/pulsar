@@ -52,14 +52,14 @@ FROM apachepulsar/pulsar:${VERSION}
 # Add the cassandra connector (also works with ScyllaDB)
 COPY --from=pulsar-all /pulsar/connectors/pulsar-io-cassandra-*.nar /pulsar/connectors
 
-# Add the jcloud offloader
-COPY --from=pulsar-all /pulsar/connectors/tiered-storage-jcloud-*.nar /pulsar/offloaders
+# Add the OpenDAL offloader
+COPY --from=pulsar-all /pulsar/connectors/tiered-storage-opendal-*.nar /pulsar/offloaders
 ```
 
 NOTE: the above example uses a wildcard in the `COPY` commands because argument expansion does not work for `COPY`.
 
 Assuming that you have the above `Dockerfile` in your local directory and are running docker on your local host, you can
-run the following command to build a custom image with the cassandra connector and the jcloud offloader. The cassandra connector is compatible with both Apache Cassandra and ScyllaDB.
+run the following command to build a custom image with the cassandra connector and the OpenDAL offloader. The cassandra connector is compatible with both Apache Cassandra and ScyllaDB.
 
 ```shell
 docker build --build-arg VERSION=2.9.1 -t pulsar-custom:2.9.1 .
