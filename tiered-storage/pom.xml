@@ -33,11 +33,13 @@
 
   <properties>
     <pulsar.jclouds.shaded.version>${project.version}</pulsar.jclouds.shaded.version>
+    <opendal.version>0.48.2</opendal.version>
   </properties>
 
   <modules>
     <module>jcloud</module>
     <module>file-system</module>
+    <module>opendal</module>
   </modules>
 
   <build>
