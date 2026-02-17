@@ -42,8 +42,11 @@ import java.util.Optional;
 import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import lombok.AllArgsConstructor;
@@ -754,5 +757,123 @@ public class MetadataCacheTest extends BaseMetadataStoreTest {
             Awaitility.await().pollInterval(Duration.ofMillis(1)).atMost(Duration.ofSeconds(3)).untilAsserted(() ->
                 assertTrue(cache.get(key).get().isPresent(), "Failed at key " + key));
         }
+    }
+
+    @Test
+    public void testRefreshCoalescingCollapsesBurst() throws Exception {
+        @Cleanup final var store = new LocalMemoryMetadataStore("memory:local", MetadataStoreConfig.builder().build());
+
+        final var deserializeCount = new AtomicInteger(0);
+        final var blockEnabled = new AtomicBoolean(false);
+        final var deserializeStarted = new CountDownLatch(1);
+        final var blockDeserialize = new CountDownLatch(1);
+
+        MetadataCache<String> cache = store.getMetadataCache(new MetadataSerde<String>() {
+            @Override
+            public byte[] serialize(String path, String value) {
+                return value.getBytes(StandardCharsets.UTF_8);
+            }
+
+            @Override
+            public String deserialize(String path, byte[] content, Stat stat) throws IOException {
+                if (blockEnabled.get()) {
+                    deserializeCount.incrementAndGet();
+                    deserializeStarted.countDown();
+                    try {
+                        blockDeserialize.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted while blocking deserialization", e);
+                    }
+                }
+                return new String(content, StandardCharsets.UTF_8);
+            }
+        });
+
+        final var key = "/refresh-coalescing-burst";
+        store.put(key, "value".getBytes(StandardCharsets.UTF_8), Optional.of(-1L)).join();
+        assertEquals(cache.get(key).join().orElseThrow(), "value");
+
+        blockEnabled.set(true);
+
+        cache.refresh(key);
+        assertTrue(deserializeStarted.await(10, TimeUnit.SECONDS), "Refresh deserialization didn't start");
+
+        // Burst refresh requests while the first refresh is in-flight should be coalesced.
+        for (int i = 0; i < 20; i++) {
+            cache.refresh(key);
+        }
+
+        // Ensure we don't start extra reads/deserializations while the first refresh is still in-flight.
+        Awaitility.await()
+                .during(250, TimeUnit.MILLISECONDS)
+                .atMost(2, TimeUnit.SECONDS)
+                .untilAsserted(() -> assertEquals(deserializeCount.get(), 1));
+
+        blockDeserialize.countDown();
+
+        Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> assertEquals(deserializeCount.get(), 2));
+        // Ensure no extra refresh sneaks in after the follow-up refresh.
+        Awaitility.await()
+                .during(250, TimeUnit.MILLISECONDS)
+                .atMost(2, TimeUnit.SECONDS)
+                .untilAsserted(() -> assertEquals(deserializeCount.get(), 2));
+    }
+
+    @Test(dataProvider = "distributedImpl")
+    public void testRefreshCoalescingDoesNotMissUpdateDuringInFlight() throws Exception {
+        @Cleanup final var store = new LocalMemoryMetadataStore("memory:local", MetadataStoreConfig.builder().build());
+
+        final var deserializeCount = new AtomicInteger(0);
+        final var blockEnabled = new AtomicBoolean(false);
+        final var deserializeStarted = new CountDownLatch(1);
+        final var blockDeserialize = new CountDownLatch(1);
+
+        MetadataCache<String> cache = store.getMetadataCache(new MetadataSerde<String>() {
+            @Override
+            public byte[] serialize(String path, String value) {
+                return value.getBytes(StandardCharsets.UTF_8);
+            }
+
+            @Override
+            public String deserialize(String path, byte[] content, Stat stat) throws IOException {
+                if (blockEnabled.get()) {
+                    deserializeCount.incrementAndGet();
+                    deserializeStarted.countDown();
+                    try {
+                        blockDeserialize.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Interrupted while blocking deserialization", e);
+                    }
+                }
+                return new String(content, StandardCharsets.UTF_8);
+            }
+        });
+
+        final var key = "/refresh-coalescing-update";
+        store.put(key, "value1".getBytes(StandardCharsets.UTF_8), Optional.of(-1L)).join();
+        assertEquals(cache.get(key).join().orElseThrow(), "value1");
+
+        blockEnabled.set(true);
+        cache.refresh(key);
+        assertTrue(deserializeStarted.await(10, TimeUnit.SECONDS), "Refresh deserialization didn't start");
+
+        // Update the value while the refresh is in-flight, then request another refresh.
+        store.put(key, "value2".getBytes(StandardCharsets.UTF_8), Optional.empty()).join();
+        cache.refresh(key);
+
+        // The second refresh should be coalesced while the first one is still in-flight.
+        Awaitility.await()
+                .during(250, TimeUnit.MILLISECONDS)
+                .atMost(2, TimeUnit.SECONDS)
+                .untilAsserted(() -> assertEquals(deserializeCount.get(), 1));
+
+        blockDeserialize.countDown();
+
+        Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                assertEquals(cache.get(key).join().orElseThrow(), "value2"));
+
+        Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> assertEquals(deserializeCount.get(), 2));
     }
 }

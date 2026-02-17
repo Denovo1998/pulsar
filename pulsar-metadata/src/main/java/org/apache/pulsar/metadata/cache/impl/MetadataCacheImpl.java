@@ -29,10 +29,13 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -67,6 +70,8 @@ public class MetadataCacheImpl<T> implements MetadataCache<T>, Consumer<Notifica
     private final MetadataCacheConfig<T> cacheConfig;
 
     private final AsyncLoadingCache<String, Optional<CacheGetResult<T>>> objCache;
+
+    private final ConcurrentHashMap<String, RefreshState> refreshStates = new ConcurrentHashMap<>();
 
     public MetadataCacheImpl(String cacheName, MetadataStore store, TypeReference<T> typeRef,
                              MetadataCacheConfig<T> cacheConfig, OrderedExecutor executor,
@@ -138,14 +143,63 @@ public class MetadataCacheImpl<T> implements MetadataCache<T>, Consumer<Notifica
         CacheMetricsCollector.CAFFEINE.addCache(cacheName, objCache);
     }
 
+    private static final class RefreshState {
+        private final AtomicBoolean dirty = new AtomicBoolean(false);
+        private final AtomicReference<CompletableFuture<?>> watchedFuture = new AtomicReference<>();
+    }
+
+    private void watchInFlightRefresh(String path, CompletableFuture<?> inFlight, RefreshState state) {
+        // Attach at most 1 watcher per RefreshState and in-flight future. If another refresh/load already
+        // switched the watched future, the previous completion callback must not interfere with the new one.
+        if (state.watchedFuture.get() == inFlight) {
+            return;
+        }
+
+        state.watchedFuture.set(inFlight);
+        inFlight.whenComplete((result, ex) -> {
+            // Only the currently watched future is allowed to consume the "dirty" bit and schedule a follow-up.
+            if (!state.watchedFuture.compareAndSet(inFlight, null)) {
+                return;
+            }
+
+            if (state.dirty.getAndSet(false)) {
+                executor.executeOrdered(path, () -> followUpRefresh(path, inFlight, state));
+            } else {
+                refreshStates.remove(path, state);
+            }
+        });
+    }
+
+    private void followUpRefresh(String path, CompletableFuture<?> completedFuture, RefreshState state) {
+        // Try to perform a follow-up refresh only if the cache is still on the same completed future.
+        // If another refresh/load already started, we avoid doing redundant work and just keep watching.
+        final var updated = objCache.asMap().computeIfPresent(path, (key, currentFuture) -> {
+            if (currentFuture != completedFuture) {
+                watchInFlightRefresh(key, currentFuture, state);
+                return currentFuture;
+            }
+
+            // Starting a refresh supersedes any pending "dirty" request for the previous future.
+            state.dirty.set(false);
+            final var newFuture = readValueFromStore(key);
+            watchInFlightRefresh(key, newFuture, state);
+            return newFuture;
+        });
+
+        if (updated == null) {
+            // The entry was invalidated/evicted while we were waiting for the in-flight future to complete.
+            refreshStates.remove(path, state);
+        }
+    }
+
     private CompletableFuture<Optional<CacheGetResult<T>>> readValueFromStore(String path) {
         final var future = new CompletableFuture<Optional<CacheGetResult<T>>>();
         store.get(path).thenComposeAsync(optRes -> {
             // There could be multiple pending reads for the same path, for example, when a path is created,
             // 1. The `accept` method will call `refresh`
             // 2. The `put` method will call `refresh` after the metadata store put operation is done
-            // Both will call this method and the same result will be read. In this case, we only need to deserialize
-            // the value once.
+            // Both will call this method. The refresh() method coalesces repeated refresh requests to reduce
+            // duplicated reads/deserializations while preserving correctness.
             if (!optRes.isPresent()) {
                 if (log.isDebugEnabled()) {
                     log.debug("Key {} not found in metadata store", path);
@@ -157,12 +211,12 @@ public class MetadataCacheImpl<T> implements MetadataCache<T>, Consumer<Notifica
                 T obj = serde.deserialize(path, res.getValue(), res.getStat());
                 if (log.isDebugEnabled()) {
                     log.debug("Deserialized value for key {} (version: {}): {}", path, res.getStat().getVersion(),
-                        obj);
+                            obj);
                 }
                 return FutureUtils.value(Optional.of(new CacheGetResult<>(obj, res.getStat())));
             } catch (Throwable t) {
                 return FutureUtils.exception(new ContentDeserializationException(
-                    "Failed to deserialize payload for key '" + path + "'", t));
+                        "Failed to deserialize payload for key '" + path + "'", t));
             }
         }, executor.chooseThread(path)).whenComplete((result, e) -> {
             if (e != null) {
@@ -280,21 +334,21 @@ public class MetadataCacheImpl<T> implements MetadataCache<T>, Consumer<Notifica
     public CompletableFuture<Void> create(String path, T value) {
         final var future = new CompletableFuture<Void>();
         serialize(path, value).thenCompose(content -> store.put(path, content, Optional.of(-1L)))
-            // Make sure we have the value cached before the operation is completed
-            // In addition to caching the value, we need to add a watch on the path,
-            // so when/if it changes on any other node, we are notified and we can
-            // update the cache
-            .thenCompose(__ -> objCache.get(path))
-            .whenComplete((__, ex) -> {
-                if (ex == null) {
-                    future.complete(null);
-                } else if (ex.getCause() instanceof BadVersionException) {
-                    // Use already exists exception to provide more self-explanatory error message
-                    future.completeExceptionally(new AlreadyExistsException(ex.getCause()));
-                } else {
-                    future.completeExceptionally(ex.getCause());
-                }
-            });
+                // Make sure we have the value cached before the operation is completed
+                // In addition to caching the value, we need to add a watch on the path,
+                // so when/if it changes on any other node, we are notified and we can
+                // update the cache
+                .thenCompose(__ -> objCache.get(path))
+                .whenComplete((__, ex) -> {
+                    if (ex == null) {
+                        future.complete(null);
+                    } else if (ex.getCause() instanceof BadVersionException) {
+                        // Use already exists exception to provide more self-explanatory error message
+                        future.completeExceptionally(new AlreadyExistsException(ex.getCause()));
+                    } else {
+                        future.completeExceptionally(ex.getCause());
+                    }
+                });
         return future;
     }
 
@@ -336,8 +390,24 @@ public class MetadataCacheImpl<T> implements MetadataCache<T>, Consumer<Notifica
 
     @Override
     public void refresh(String path) {
-        // Refresh object of path if only it is cached before.
-        objCache.asMap().computeIfPresent(path, (oldKey, oldValue) -> readValueFromStore(path));
+        // Refresh object of path only if it is cached before.
+        objCache.asMap().computeIfPresent(path, (key, currentFuture) -> {
+            final var state = refreshStates.computeIfAbsent(key, __ -> new RefreshState());
+
+            if (!currentFuture.isDone()) {
+                // A refresh/load is already in-flight. Coalesce repeated refresh requests into a single
+                // follow-up refresh after the current future completes.
+                state.dirty.set(true);
+                watchInFlightRefresh(key, currentFuture, state);
+                return currentFuture;
+            }
+
+            // Starting a refresh supersedes any pending "dirty" request for the previous future.
+            state.dirty.set(false);
+            final var newFuture = readValueFromStore(key);
+            watchInFlightRefresh(key, newFuture, state);
+            return newFuture;
+        });
     }
 
     @VisibleForTesting
@@ -349,20 +419,20 @@ public class MetadataCacheImpl<T> implements MetadataCache<T>, Consumer<Notifica
     public void accept(Notification t) {
         String path = t.getPath();
         switch (t.getType()) {
-        case Created:
-        case Modified:
-            if (log.isDebugEnabled()) {
-                log.debug("Refreshing path {} for {} notification", path, t.getType());
-            }
-            refresh(path);
-            break;
+            case Created:
+            case Modified:
+                if (log.isDebugEnabled()) {
+                    log.debug("Refreshing path {} for {} notification", path, t.getType());
+                }
+                refresh(path);
+                break;
 
-        case Deleted:
-            objCache.synchronous().invalidate(path);
-            break;
+            case Deleted:
+                objCache.synchronous().invalidate(path);
+                break;
 
-        default:
-            break;
+            default:
+                break;
         }
     }
 
