@@ -820,7 +820,7 @@ public class MetadataCacheTest extends BaseMetadataStoreTest {
                 .untilAsserted(() -> assertEquals(deserializeCount.get(), 2));
     }
 
-    @Test(dataProvider = "distributedImpl")
+    @Test
     public void testRefreshCoalescingDoesNotMissUpdateDuringInFlight() throws Exception {
         @Cleanup final var store = new LocalMemoryMetadataStore("memory:local", MetadataStoreConfig.builder().build());
 
