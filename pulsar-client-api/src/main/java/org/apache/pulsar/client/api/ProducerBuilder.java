@@ -82,6 +82,21 @@ public interface ProducerBuilder<T> extends Cloneable {
     ProducerBuilder<T> loadConf(Map<String, Object> config);
 
     /**
+     * Configure Chronos inner-topic publishing for this producer.
+     *
+     * <p>This enables a second, explicit publishing path exposed through {@link Producer#newChronosMessage()} and
+     * {@link Producer#cancelChronosMessage(String, String...)}. It does not modify standard Pulsar delayed delivery
+     * semantics such as {@link TypedMessageBuilder#deliverAfter(long, java.util.concurrent.TimeUnit)} or
+     * {@link TypedMessageBuilder#deliverAt(long)}.
+     *
+     * @param config Chronos producer configuration
+     * @return the producer builder instance
+     */
+    default ProducerBuilder<T> chronosConfiguration(ChronosProducerConfiguration config) {
+        throw new UnsupportedOperationException("Chronos configuration is not supported");
+    }
+
+    /**
      * Create a copy of the current {@link ProducerBuilder}.
      *
      * <p>Cloning the builder can be used to share an incomplete configuration and specialize it multiple times. For

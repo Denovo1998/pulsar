@@ -35,6 +35,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.client.api.BatcherBuilder;
+import org.apache.pulsar.client.api.ChronosProducerConfiguration;
 import org.apache.pulsar.client.api.CompressionType;
 import org.apache.pulsar.client.api.CryptoKeyReader;
 import org.apache.pulsar.client.api.HashingScheme;
@@ -210,6 +211,8 @@ public class ProducerConfigurationData implements Serializable, Cloneable {
 
     private SortedMap<String, String> properties = new TreeMap<>();
 
+    private ChronosProducerConfiguration chronosProducerConfiguration;
+
     private boolean isNonPartitionedTopicExpected;
 
     private boolean isReplProducer;
@@ -236,6 +239,9 @@ public class ProducerConfigurationData implements Serializable, Cloneable {
             ProducerConfigurationData c = (ProducerConfigurationData) super.clone();
             c.encryptionKeys = Sets.newTreeSet(this.encryptionKeys);
             c.properties = new TreeMap<>(this.properties);
+            c.chronosProducerConfiguration = chronosProducerConfiguration == null
+                    ? null
+                    : chronosProducerConfiguration.clone();
             return c;
         } catch (CloneNotSupportedException e) {
             throw new RuntimeException("Failed to clone ProducerConfigurationData", e);

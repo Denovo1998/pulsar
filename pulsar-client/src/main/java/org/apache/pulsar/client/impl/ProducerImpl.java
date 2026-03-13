@@ -197,7 +197,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
     public ProducerImpl(PulsarClientImpl client, String topic, ProducerConfigurationData conf,
                         CompletableFuture<Producer<T>> producerCreatedFuture, int partitionIndex, Schema<T> schema,
                         ProducerInterceptors interceptors, Optional<String> overrideProducerName) {
-        super(client, topic, conf, producerCreatedFuture, schema, interceptors);
+        super(client, topic, conf, producerCreatedFuture, schema, interceptors, partitionIndex < 0);
         this.producerId = client.newProducerId();
         this.producerName = conf.getProducerName();
         this.userProvidedProducerName = StringUtils.isNotBlank(producerName);
@@ -1205,6 +1205,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
         CompletableFuture<Void> closeFuture = new CompletableFuture<>();
         List<CompletableFuture<Void>> closeTasks = new ArrayList<>();
         closeTasks.add(closeFuture);
+        closeTasks.add(closeChronosMessageSenderAsync());
         if (schema != null) {
             closeTasks.add(schema.closeAsync().whenComplete((__, t) -> {
                 if (t != null) {
@@ -1215,7 +1216,8 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
         CompletableFuture<Void> compositeCloseFuture = FutureUtil.waitForAll(closeTasks);
 
         if (currentState == State.Closed || currentState == State.Closing) {
-            return CompletableFuture.completedFuture(null);
+            closeFuture.complete(null);
+            return compositeCloseFuture;
         }
 
         producersClosedCounter.increment();
@@ -1225,7 +1227,8 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
         if (cnx == null || currentState != State.Ready) {
             log.info("[{}] [{}] Closed Producer (not connected)", topic, producerName);
             closeAndClearPendingMessages();
-            return CompletableFuture.completedFuture(null);
+            closeFuture.complete(null);
+            return compositeCloseFuture;
         }
 
         long requestId = client.newRequestId();

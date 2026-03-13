@@ -23,10 +23,13 @@ import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertNotSame;
+import static org.testng.Assert.assertEquals;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import org.apache.pulsar.client.api.ChronosProducerConfiguration;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageRouter;
 import org.apache.pulsar.client.api.MessageRoutingMode;
@@ -87,6 +90,30 @@ public class ProducerBuilderImplTest {
         producerBuilderImpl.topic(TOPIC_NAME).messageCrypto(new MessageCryptoBc("ctx1", true));
         assertNotNull(producerBuilderImpl.create());
         assertNotNull(producerBuilderImpl.getConf().getMessageCrypto());
+    }
+
+    @Test
+    public void testChronosConfigurationStoredAsCopy() {
+        ChronosProducerConfiguration chronosConfiguration = new ChronosProducerConfiguration()
+                .setInnerTopic("persistent://public/default/chronos-inner")
+                .setMaxPendingMessages(11);
+
+        producerBuilderImpl.chronosConfiguration(chronosConfiguration);
+        chronosConfiguration.setMaxPendingMessages(22);
+
+        assertNotSame(producerBuilderImpl.getConf().getChronosProducerConfiguration(), chronosConfiguration);
+        assertEquals(producerBuilderImpl.getConf().getChronosProducerConfiguration().getMaxPendingMessages(), 11);
+
+        ProducerBuilderImpl<byte[]> clonedBuilder = (ProducerBuilderImpl<byte[]>) producerBuilderImpl.clone();
+        clonedBuilder.getConf().getChronosProducerConfiguration().setMaxPendingMessages(33);
+
+        assertEquals(producerBuilderImpl.getConf().getChronosProducerConfiguration().getMaxPendingMessages(), 11);
+    }
+
+    @Test(expectedExceptions = IllegalArgumentException.class)
+    public void testChronosConfigurationRejectsInvalidTopic() {
+        producerBuilderImpl.chronosConfiguration(
+                new ChronosProducerConfiguration().setInnerTopic("persistent://public/default/"));
     }
 
     @Test

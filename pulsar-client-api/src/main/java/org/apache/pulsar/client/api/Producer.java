@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.client.api;
 
+import com.xiaojukeji.carrera.chronos.protocol.ChronosSendResult;
 import java.io.Closeable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -205,6 +206,63 @@ public interface Producer<T> extends Closeable {
      */
     <V> TypedMessageBuilder<V> newMessage(Schema<V> schema,
                                           Transaction txn);
+
+    /**
+     * Create a new Chronos message builder.
+     *
+     * <p>This is a separate publishing path from {@link #newMessage()}. Messages sent through this builder are encoded
+     * with the producer schema, wrapped in the Chronos protocol, and published to the configured Chronos inner topic.
+     *
+     * <p>Example:
+     * <pre>{@code
+     * Producer<String> producer = client.newProducer(Schema.STRING)
+     *         .topic("persistent://public/default/orders")
+     *         .chronosConfiguration(new ChronosProducerConfiguration()
+     *                 .setInnerTopic("persistent://public/default/chronos-inner"))
+     *         .create();
+     *
+     * producer.newMessage()
+     *         .value("short-delay")
+     *         .deliverAfter(5, TimeUnit.MINUTES)
+     *         .send();
+     *
+     * ChronosDelayMeta delayMeta = new ChronosDelayMeta();
+     * delayMeta.setTimestamp(System.currentTimeMillis() + TimeUnit.DAYS.toMillis(7));
+     *
+     * producer.newChronosMessage()
+     *         .value("long-delay")
+     *         .delayMeta(delayMeta)
+     *         .tags("campaign")
+     *         .send();
+     * }</pre>
+     *
+     * @return a Chronos message builder
+     */
+    default ChronosDelayMessageBuilder<T> newChronosMessage() {
+        throw new UnsupportedOperationException("Chronos messages are not supported");
+    }
+
+    /**
+     * Send a Chronos cancel request.
+     *
+     * @param uniqDelayMsgId Chronos delay message id
+     * @param tags optional Chronos tags
+     * @return Chronos send result
+     */
+    default ChronosSendResult cancelChronosMessage(String uniqDelayMsgId, String... tags) {
+        throw new UnsupportedOperationException("Chronos messages are not supported");
+    }
+
+    /**
+     * Send a Chronos cancel request asynchronously.
+     *
+     * @param uniqDelayMsgId Chronos delay message id
+     * @param tags optional Chronos tags
+     * @return future for the Chronos send result
+     */
+    default CompletableFuture<ChronosSendResult> cancelChronosMessageAsync(String uniqDelayMsgId, String... tags) {
+        throw new UnsupportedOperationException("Chronos messages are not supported");
+    }
 
     /**
      * Get the last sequence id that was published by this producer.

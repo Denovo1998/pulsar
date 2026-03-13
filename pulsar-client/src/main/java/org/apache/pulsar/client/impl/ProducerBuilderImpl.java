@@ -31,6 +31,7 @@ import lombok.Getter;
 import lombok.NonNull;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.client.api.BatcherBuilder;
+import org.apache.pulsar.client.api.ChronosProducerConfiguration;
 import org.apache.pulsar.client.api.CompressionType;
 import org.apache.pulsar.client.api.CryptoKeyReader;
 import org.apache.pulsar.client.api.HashingScheme;
@@ -47,6 +48,7 @@ import org.apache.pulsar.client.api.interceptor.ProducerInterceptor;
 import org.apache.pulsar.client.api.interceptor.ProducerInterceptorWrapper;
 import org.apache.pulsar.client.impl.conf.ConfigurationDataUtils;
 import org.apache.pulsar.client.impl.conf.ProducerConfigurationData;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.util.FutureUtil;
 
 @Getter(AccessLevel.PUBLIC)
@@ -126,6 +128,14 @@ public class ProducerBuilderImpl<T> implements ProducerBuilder<T> {
     public ProducerBuilder<T> loadConf(Map<String, Object> config) {
         conf = ConfigurationDataUtils.loadData(
             config, conf, ProducerConfigurationData.class);
+        return this;
+    }
+
+    @Override
+    public ProducerBuilder<T> chronosConfiguration(ChronosProducerConfiguration config) {
+        checkArgument(config != null, "chronosConfiguration cannot be null");
+        checkArgument(TopicName.isValid(config.getInnerTopic()), "innerTopic must be a valid topic name");
+        conf.setChronosProducerConfiguration(config.clone());
         return this;
     }
 

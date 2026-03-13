@@ -19,9 +19,11 @@
 package org.apache.pulsar.client.impl;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import com.xiaojukeji.carrera.chronos.protocol.ChronosSendResult;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.pulsar.client.api.ChronosDelayMessageBuilder;
 import org.apache.pulsar.client.api.Message;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.Producer;
@@ -41,16 +43,20 @@ public abstract class ProducerBase<T> extends HandlerState implements Producer<T
     protected final ProducerConfigurationData conf;
     protected final Schema<T> schema;
     protected final ProducerInterceptors interceptors;
+    protected final ChronosMessageSender<T> chronosMessageSender;
     protected final Map<SchemaHash, byte[]> schemaCache = new ConcurrentHashMap<>();
     protected volatile MultiSchemaMode multiSchemaMode = MultiSchemaMode.Auto;
 
     protected ProducerBase(PulsarClientImpl client, String topic, ProducerConfigurationData conf,
-            CompletableFuture<Producer<T>> producerCreatedFuture, Schema<T> schema, ProducerInterceptors interceptors) {
+            CompletableFuture<Producer<T>> producerCreatedFuture, Schema<T> schema, ProducerInterceptors interceptors,
+            boolean enableChronos) {
         super(client, topic);
         this.producerCreatedFuture = producerCreatedFuture;
         this.conf = conf;
         this.schema = schema;
         this.interceptors = interceptors;
+        this.chronosMessageSender = new ChronosMessageSender<>(client, topic, schema,
+                enableChronos ? conf.getChronosProducerConfiguration() : null);
         if (!conf.isMultiSchema()) {
             multiSchemaMode = MultiSchemaMode.Disabled;
         }
@@ -99,6 +105,21 @@ public abstract class ProducerBase<T> extends HandlerState implements Producer<T
         checkArgument(txn instanceof TransactionImpl);
         checkArgument(schema != null);
         return new TypedMessageBuilderImpl<>(this, schema, (TransactionImpl) txn);
+    }
+
+    @Override
+    public ChronosDelayMessageBuilder<T> newChronosMessage() {
+        return new ChronosDelayMessageBuilderImpl<>(chronosMessageSender);
+    }
+
+    @Override
+    public ChronosSendResult cancelChronosMessage(String uniqDelayMsgId, String... tags) {
+        return cancelChronosMessageAsync(uniqDelayMsgId, tags).join();
+    }
+
+    @Override
+    public CompletableFuture<ChronosSendResult> cancelChronosMessageAsync(String uniqDelayMsgId, String... tags) {
+        return chronosMessageSender.cancelAsync(uniqDelayMsgId, tags);
     }
 
     abstract CompletableFuture<MessageId> internalSendAsync(Message<?> message);
@@ -156,6 +177,10 @@ public abstract class ProducerBase<T> extends HandlerState implements Producer<T
 
     public CompletableFuture<Producer<T>> producerCreatedFuture() {
         return producerCreatedFuture;
+    }
+
+    protected CompletableFuture<Void> closeChronosMessageSenderAsync() {
+        return chronosMessageSender.closeAsync();
     }
 
     protected Message<?> beforeSend(Message<?> message) {

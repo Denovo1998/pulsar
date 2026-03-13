@@ -77,7 +77,7 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
     public PartitionedProducerImpl(PulsarClientImpl client, String topic, ProducerConfigurationData conf,
                                    int numPartitions, CompletableFuture<Producer<T>> producerCreatedFuture,
                                    Schema<T> schema, ProducerInterceptors interceptors) {
-        super(client, topic, conf, producerCreatedFuture, schema, interceptors);
+        super(client, topic, conf, producerCreatedFuture, schema, interceptors, true);
         this.topicMetadata = new TopicMetadataImpl(numPartitions);
         this.routerPolicy = getMessageRouter();
         stats = client.getConfiguration().getStatsIntervalSeconds() > 0
@@ -315,8 +315,9 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
 
     @Override
     public CompletableFuture<Void> closeAsync() {
+        CompletableFuture<Void> chronosCloseFuture = closeChronosMessageSenderAsync();
         if (getState() == State.Closing || getState() == State.Closed) {
-            return CompletableFuture.completedFuture(null);
+            return chronosCloseFuture;
         }
         setState(State.Closing);
 
@@ -328,6 +329,12 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
         AtomicReference<Throwable> closeFail = new AtomicReference<Throwable>();
         AtomicInteger completed = new AtomicInteger((int) producers.size());
         CompletableFuture<Void> closeFuture = new CompletableFuture<>();
+        if (producers.isEmpty()) {
+            setState(State.Closed);
+            closeFuture.complete(null);
+            client.cleanupProducer(this);
+            return FutureUtil.waitForAll(List.of(closeFuture, chronosCloseFuture));
+        }
         for (Producer<T> producer : producers.values()) {
             if (producer != null) {
                 producer.closeAsync().handle((closed, ex) -> {
@@ -353,7 +360,7 @@ public class PartitionedProducerImpl<T> extends ProducerBase<T> {
 
         }
 
-        return closeFuture;
+        return FutureUtil.waitForAll(List.of(closeFuture, chronosCloseFuture));
     }
 
     @Override
