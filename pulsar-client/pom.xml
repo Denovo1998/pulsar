@@ -68,6 +68,12 @@
     </dependency>
 
     <dependency>
+      <groupId>com.xiaojukeji.ddmq</groupId>
+      <artifactId>carrera-pulsar-delay-sdk</artifactId>
+      <version>${carrera.pulsar.delay.sdk.version}</version>
+    </dependency>
+
+    <dependency>
       <!-- this module only need by the real client, client inside broker no need this module -->
       <groupId>${project.groupId}</groupId>
       <artifactId>pulsar-client-messagecrypto-bc</artifactId>

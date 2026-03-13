@@ -33,17 +33,25 @@
 
     <dependencies>
         <!--
-            This module is meant to be free of any dependencies, because we don't want to have external symbols
-            exposed directly in our API.
+            This module is meant to be free of external API dependencies whenever possible.
 
-            The exception here is Protobuf, in order to support Protobuf schema. The library is marked as provided
-            so it's the user responsibility to add it to the classpath.
+            The current exceptions are:
+            - Protobuf, in order to support Protobuf schema. The library is marked as provided so it's the user's
+              responsibility to add it to the classpath.
+            - OpenTelemetry, for tracing-related API types.
+            - carrera-pulsar-delay-sdk, because Chronos public APIs intentionally reuse its protocol types.
         -->
 
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
             <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.xiaojukeji.ddmq</groupId>
+            <artifactId>carrera-pulsar-delay-sdk</artifactId>
+            <version>${carrera.pulsar.delay.sdk.version}</version>
         </dependency>
 
         <dependency>

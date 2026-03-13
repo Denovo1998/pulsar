@@ -83,6 +83,7 @@ flexible messaging model and an intuitive client API.</description>
     <pulsar.client.compiler.release>17</pulsar.client.compiler.release>
 
     <pulsar.client.python.version>3.10.0</pulsar.client.python.version>
+    <carrera.pulsar.delay.sdk.version>1.0.0-SNAPSHOT</carrera.pulsar.delay.sdk.version>
 
     <IMAGE_JDK_MAJOR_VERSION>21</IMAGE_JDK_MAJOR_VERSION>
 

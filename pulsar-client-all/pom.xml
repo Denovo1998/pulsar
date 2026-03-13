@@ -63,6 +63,11 @@
       <optional>true</optional>
     </dependency>
     <dependency>
+      <groupId>com.xiaojukeji.ddmq</groupId>
+      <artifactId>carrera-pulsar-delay-sdk</artifactId>
+      <version>${carrera.pulsar.delay.sdk.version}</version>
+    </dependency>
+    <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-api</artifactId>
       <scope>test</scope>
@@ -152,6 +157,7 @@
               <minimizeJar>false</minimizeJar>
               <artifactSet>
                 <includes>
+                  <include>com.alibaba:fastjson</include>
                   <include>com.fasterxml.jackson.*:*</include>
                   <include>com.google.*:*</include>
                   <include>com.google.auth:*</include>
@@ -194,6 +200,7 @@
                   <include>org.apache.bookkeeper:*</include>
                   <include>org.apache.commons:commons-compress</include>
                   <include>org.apache.commons:commons-lang3</include>
+                  <include>com.xiaojukeji.ddmq:carrera-pulsar-delay-sdk</include>
                   <include>org.apache.pulsar:pulsar-client-admin-original</include>
                   <!-- Issue #6834, Since Netty ByteBuf shaded, we need also shade this module -->
                   <include>org.apache.pulsar:pulsar-client-messagecrypto-bc</include>
@@ -266,6 +273,10 @@
                   <pattern>(META-INF/native/(lib)?)(netty.+\.(so|jnilib|dll))$</pattern>
                   <shadedPattern>$1org_apache_pulsar_shade_$3</shadedPattern>
                   <rawString>true</rawString>
+                </relocation>
+                <relocation>
+                  <pattern>com.alibaba</pattern>
+                  <shadedPattern>org.apache.pulsar.shade.com.alibaba</shadedPattern>
                 </relocation>
                 <relocation>
                   <pattern>com.fasterxml.jackson</pattern>
