@@ -565,31 +565,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                                             buckets.get(0).startLedgerId,
                                             buckets.get(buckets.size() - 1).endLedgerId);
 
-                            if (immutableBucketDelayedIndexPair == null) {
-                                // No delayed indexes remained in the segments to merge.
-                                // Keep the existing buckets as-is and skip creating a new one.
-                                // log.warn("[{}] Skip merging bucket snapshot, no remaining indexes found, "
-                                //                 + "startLedgerId: {}, endLedgerId: {}",
-                                //         context.getName(), buckets.get(0).startLedgerId,
-                                //         buckets.get(buckets.size() - 1).endLedgerId);
-                                return;
-                            }
-
-                            // Merge bit map from all source buckets into the new bucket,
-                            // defensively handling buckets that don't yet have an in-memory
-                            // bitmap (for example when used with MockBucketSnapshotStorage
-                            // in benchmarks).
-                            Map<Long, RoaringBitmap> delayedIndexBitMap = new HashMap<>();
-                            Map<Long, RoaringBitmap> baseMap = buckets.get(0).getDelayedIndexBitMap();
-                            if (baseMap != null) {
-                                delayedIndexBitMap.putAll(baseMap);
-                            }
+                            // Merge bit map to new bucket
+                            Map<Long, RoaringBitmap> delayedIndexBitMap =
+                                    new HashMap<>(buckets.get(0).getDelayedIndexBitMap());
                             for (int i = 1; i < buckets.size(); i++) {
-                                Map<Long, RoaringBitmap> otherMap = buckets.get(i).getDelayedIndexBitMap();
-                                if (otherMap == null) {
-                                    continue;
-                                }
-                                otherMap.forEach((ledgerId, bitMapB) -> {
+                                buckets.get(i).delayedIndexBitMap.forEach((ledgerId, bitMapB) -> {
                                     delayedIndexBitMap.compute(ledgerId, (k, bitMap) -> {
                                         if (bitMap == null) {
                                             return bitMapB;
@@ -762,8 +742,12 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                         stats.recordSuccessEvent(BucketDelayedMessageIndexStats.Type.load,
                                 System.currentTimeMillis() - loadStartTime);
                     }
-                    // Re-schedule the timer to process newly loaded entries as soon as possible.
-                    scheduleImmediateRun();
+                    synchronized (this) {
+                        if (timeout != null) {
+                            timeout.cancel();
+                        }
+                        timeout = timer.newTimeout(this, 0, TimeUnit.MILLISECONDS);
+                    }
                 });
 
                 if (!checkPendingLoadDone() || loadFuture.isCompletedExceptionally()) {

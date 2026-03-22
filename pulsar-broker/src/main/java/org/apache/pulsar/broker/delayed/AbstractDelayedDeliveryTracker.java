@@ -48,8 +48,7 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
     protected final Clock clock;
 
     private final boolean isDelayedDeliveryDeliverAtTimeStrict;
-
-    private final Object timerStateLock = new Object();
+    private final Object triggerLock;
 
     public AbstractDelayedDeliveryTracker(AbstractPersistentDispatcherMultipleConsumers dispatcher, Timer timer,
                                           long tickTimeMillis,
@@ -75,6 +74,7 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
                                           long tickTimeMillis, Clock clock,
                                           boolean isDelayedDeliveryDeliverAtTimeStrict) {
         this.context = context;
+        this.triggerLock = context.getTriggerLock();
         this.timer = timer;
         this.tickTimeMillis = tickTimeMillis;
         this.clock = clock;
@@ -104,61 +104,48 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
 
     protected void updateTimer() {
         if (getNumberOfDelayedMessages() == 0) {
-            synchronized (timerStateLock) {
-                if (timeout != null) {
-                    currentTimeoutTarget = -1;
-                    timeout.cancel();
-                    timeout = null;
-                }
+            if (timeout != null) {
+                currentTimeoutTarget = -1;
+                timeout.cancel();
+                timeout = null;
             }
             return;
         }
         long timestamp = nextDeliveryTime();
-        synchronized (timerStateLock) {
-            if (timestamp == currentTimeoutTarget) {
-                // The timer is already set to the correct target time
-                return;
-            }
-
-            if (timeout != null) {
-                timeout.cancel();
-            }
-
-            long now = clock.millis();
-            long delayMillis = timestamp - now;
-
-            if (delayMillis < 0) {
-                // There are messages that are already ready to be delivered. If
-                // the dispatcher is not getting them is because the consumer is
-                // either not connected or slow.
-                // We don't need to keep retriggering the timer. When the consumer
-                // catches up, the dispatcher will do the readMoreEntries() and
-                // get these messages
-                return;
-            }
-
-            // Compute the earliest time that we schedule the timer to run.
-            long remainingTickDelayMillis = lastTickRun + tickTimeMillis - now;
-            long calculatedDelayMillis = Math.max(delayMillis, remainingTickDelayMillis);
-
-            if (log.isDebugEnabled()) {
-                log.debug("[{}] Start timer in {} millis", context.getName(), calculatedDelayMillis);
-            }
-
-            // Even though we may delay longer than this timestamp because of the tick delay, we still track the
-            // current timeout with reference to the next message's timestamp.
-            currentTimeoutTarget = timestamp;
-            timeout = timer.newTimeout(this, calculatedDelayMillis, TimeUnit.MILLISECONDS);
+        if (timestamp == currentTimeoutTarget) {
+            // The timer is already set to the correct target time
+            return;
         }
-    }
 
-    protected final void scheduleImmediateRun() {
-        synchronized (timerStateLock) {
-            if (timeout != null) {
-                timeout.cancel();
-            }
-            timeout = timer.newTimeout(this, 0, TimeUnit.MILLISECONDS);
+        if (timeout != null) {
+            timeout.cancel();
         }
+
+        long now = clock.millis();
+        long delayMillis = timestamp - now;
+
+        if (delayMillis < 0) {
+            // There are messages that are already ready to be delivered. If
+            // the dispatcher is not getting them is because the consumer is
+            // either not connected or slow.
+            // We don't need to keep retriggering the timer. When the consumer
+            // catches up, the dispatcher will do the readMoreEntries() and
+            // get these messages
+            return;
+        }
+
+        // Compute the earliest time that we schedule the timer to run.
+        long remainingTickDelayMillis = lastTickRun + tickTimeMillis - now;
+        long calculatedDelayMillis = Math.max(delayMillis, remainingTickDelayMillis);
+
+        if (log.isDebugEnabled()) {
+            log.debug("[{}] Start timer in {} millis", context.getName(), calculatedDelayMillis);
+        }
+
+        // Even though we may delay longer than this timestamp because of the tick delay, we still track the
+        // current timeout with reference to the next message's timestamp.
+        currentTimeoutTarget = timestamp;
+        timeout = timer.newTimeout(this, calculatedDelayMillis, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -170,21 +157,19 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
             return;
         }
 
-        synchronized (timerStateLock) {
+        synchronized (triggerLock) {
             lastTickRun = clock.millis();
             currentTimeoutTarget = -1;
             this.timeout = null;
+            context.triggerReadMoreEntries();
         }
-        context.triggerReadMoreEntries();
     }
 
     @Override
     public void close() {
-        synchronized (timerStateLock) {
-            if (timeout != null) {
-                timeout.cancel();
-                timeout = null;
-            }
+        if (timeout != null) {
+            timeout.cancel();
+            timeout = null;
         }
     }
 

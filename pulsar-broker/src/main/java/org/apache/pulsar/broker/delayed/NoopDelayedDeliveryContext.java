@@ -26,6 +26,7 @@ public class NoopDelayedDeliveryContext implements DelayedDeliveryContext {
     private final String name;
     private final ManagedCursor cursor;
     private final AtomicInteger triggerCount = new AtomicInteger();
+    private final Object triggerLock = new Object();
 
     public NoopDelayedDeliveryContext(String name, ManagedCursor cursor) {
         this.name = name;
@@ -40,6 +41,11 @@ public class NoopDelayedDeliveryContext implements DelayedDeliveryContext {
     @Override
     public ManagedCursor getCursor() {
         return cursor;
+    }
+
+    @Override
+    public Object getTriggerLock() {
+        return triggerLock;
     }
 
     @Override
