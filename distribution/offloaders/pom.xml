@@ -53,7 +53,7 @@
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
-      <artifactId>tiered-storage-jcloud</artifactId>
+      <artifactId>tiered-storage-opendal</artifactId>
       <version>${project.version}</version>
       <type>pom</type>
       <scope>provided</scope>

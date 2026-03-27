@@ -8,3 +8,14 @@ contains:
 
  * META-INF/DEPEDENCIES file with licensing information for all transitive
    dependencies
+
+Included offloaders:
+
+ * tiered-storage-opendal-<version>.nar (cloud offloaders: aws-s3/S3/aliyun-oss/google-cloud-storage/azureblob)
+ * tiered-storage-file-system-<version>.nar (filesystem offloader)
+
+Migration / rollback guidance (to avoid offloader discovery conflicts):
+
+ * Migration: ensure ${PULSAR_HOME}/offloaders contains only the OpenDAL NAR
+   (tiered-storage-opendal-*.nar). Do not keep tiered-storage-jcloud-*.nar alongside it.
+ * Rollback: remove tiered-storage-opendal-*.nar and restore tiered-storage-jcloud-*.nar.

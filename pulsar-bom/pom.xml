@@ -672,6 +672,11 @@
       </dependency>
       <dependency>
         <groupId>org.apache.pulsar</groupId>
+        <artifactId>tiered-storage-opendal</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.pulsar</groupId>
         <artifactId>tiered-storage-jcloud</artifactId>
         <version>${project.version}</version>
       </dependency>
