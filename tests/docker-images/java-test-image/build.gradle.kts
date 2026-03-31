@@ -17,25 +17,40 @@
  * under the License.
  */
 
-// Docker image module — no Java compilation needed
-tasks.named("compileJava") { enabled = false }
-tasks.named("compileTestJava") { enabled = false }
-tasks.named("jar") { enabled = false }
+group = "org.apache.pulsar"
+version = the<VersionCatalogsExtension>().named("libs").findVersion("pulsar").get().requiredVersion
+
 
 val pulsarVersion = project.version.toString()
 val dockerOrganization = providers.gradleProperty("docker.organization").getOrElse("apachepulsar")
 val dockerTag = providers.gradleProperty("docker.tag").getOrElse("latest")
 val dockerPlatforms = providers.gradleProperty("docker.platforms").getOrElse("")
 
-// Dependencies: base pulsar image, java-test-functions jar, buildtools jar
-val pulsarDockerBuild = project(":docker:pulsar-docker-image").tasks.named("dockerBuild")
-val testFunctionsJar = project(":tests:java-test-functions").tasks.named("shadowJar")
-val buildtoolsJar = project(":buildtools").tasks.named("jar")
+// Ensure the parent project is configured before resolving cross-project task references.
+// Required for --configure-on-demand: the Kotlin DSL needs parent ClassLoaderScopes to be locked.
+evaluationDependsOn(":docker")
+
+// Resolvable configurations for cross-project artifact dependencies.
+// Using configurations instead of direct task references (project().tasks.named())
+// ensures compatibility with Gradle's configure-on-demand feature.
+val testFunctionsJar by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+    isTransitive = false
+}
+val buildtoolsJar by configurations.creating {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+    isTransitive = false
+}
+
+dependencies {
+    testFunctionsJar(project(":tests:java-test-functions"))
+    buildtoolsJar(project(":buildtools"))
+}
 
 // Prepare the build context in build/target/
 val prepareBuildContext by tasks.registering(Sync::class) {
-    dependsOn(testFunctionsJar, buildtoolsJar)
-
     // Copy scripts from docker/pulsar/scripts and latest-version-image/scripts
     from("${rootDir}/docker/pulsar/scripts") {
         into("scripts")
@@ -55,12 +70,12 @@ val prepareBuildContext by tasks.registering(Sync::class) {
     }
 
     // Copy java-test-functions.jar
-    from(testFunctionsJar.map { (it as Jar).archiveFile }) {
+    from(testFunctionsJar) {
         rename { "java-test-functions.jar" }
     }
 
     // Copy buildtools.jar
-    from(buildtoolsJar.map { (it as Jar).archiveFile }) {
+    from(buildtoolsJar) {
         rename { "buildtools.jar" }
     }
 
@@ -71,7 +86,7 @@ val dockerBuild by tasks.registering(Exec::class) {
     group = "docker"
     description = "Build the java-test-image Docker image"
 
-    dependsOn(pulsarDockerBuild, prepareBuildContext)
+    dependsOn(":docker:pulsar-docker-image:dockerBuild", prepareBuildContext)
 
     val imageName = "${dockerOrganization}/java-test-image:${dockerTag}"
     val pulsarImage = "${dockerOrganization}/pulsar:${dockerTag}"
@@ -91,8 +106,4 @@ val dockerBuild by tasks.registering(Exec::class) {
     args.add(".")
 
     commandLine(args)
-}
-
-tasks.named("assemble") {
-    dependsOn(dockerBuild)
 }

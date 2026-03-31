@@ -149,7 +149,6 @@ jobs:
     name: Build and License check
     env:
       JOB_NAME: Build and License check
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -176,17 +175,14 @@ jobs:
           java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+          cache-read-only: false
 
       - name: Build, check licenses and code style
-        # --no-configuration-cache: Shadow plugin's filesMatching { filter { } } lambdas
-        # capture Gradle script references that can't be serialized by the configuration cache.
         run: >-
-          ./gradlew assemble rat licenseMain licenseTest checkstyleMain checkstyleTest
+          ./gradlew assemble rat spotlessCheck checkstyleMain checkstyleTest
           --no-configuration-cache
 
       - name: Check binary licenses
@@ -232,7 +228,6 @@ jobs:
     name: CI - Unit - ${{ matrix.name }}
     env:
       JOB_NAME: CI - Unit - ${{ matrix.name }}
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
       TRACE_TEST_RESOURCE_CLEANUP: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.trace_test_resource_cleanup || 'off' }}
       TRACE_TEST_RESOURCE_CLEANUP_DIR: ${{ github.workspace }}/build/trace-test-resource-cleanup
@@ -303,11 +298,9 @@ jobs:
           java-version: ${{ matrix.jdk || env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
 
       - name: Restore build outputs from build job
         uses: actions/download-artifact@v8
@@ -333,13 +326,6 @@ jobs:
       - name: Aggregate test reports to ./test-reports directory
         if: ${{ always() }}
         uses: ./.github/actions/copy-test-reports
-
-      - name: Publish Test Report
-        uses: apache/pulsar-test-infra/action-junit-report@master
-        if: ${{ always() }}
-        with:
-          report_paths: 'test-reports/TEST-*.xml'
-          annotate_only: 'true'
 
       - name: Report detected thread leaks
         if: ${{ always() }}
@@ -393,7 +379,6 @@ jobs:
     needs: ['preconditions', 'build-and-license-check']
     if: ${{ needs.preconditions.outputs.docs_only != 'true' }}
     env:
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
     steps:
       - name: checkout
@@ -409,11 +394,9 @@ jobs:
           java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
 
       - name: Build with Gradle
         run: ./gradlew assemble
@@ -425,7 +408,6 @@ jobs:
     needs: ['preconditions', 'build-and-license-check']
     if: ${{ needs.preconditions.outputs.docs_only != 'true' }}
     env:
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
     steps:
       - name: checkout
@@ -448,11 +430,9 @@ jobs:
           java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
 
       - name: Restore build outputs from build job
         uses: actions/download-artifact@v8
@@ -463,7 +443,7 @@ jobs:
         run: tar xf gradle-build-outputs.tar
 
       - name: Build java-test-image Docker image
-        run: ./gradlew -Pdocker :tests:java-test-image:dockerBuild
+        run: ./gradlew :tests:java-test-image:dockerBuild
 
       - name: Save docker image to file
         run: |
@@ -493,7 +473,6 @@ jobs:
     env:
       JOB_NAME: CI - Integration - ${{ matrix.name }}
       PULSAR_TEST_IMAGE_NAME: apachepulsar/java-test-image:latest
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
     strategy:
       fail-fast: false
@@ -515,19 +494,16 @@ jobs:
             group: SHADE_RUN
             upload_name: SHADE_RUN_17
             runtime_jdk: 17
-            setup: ./pulsar-build/run_integration_group_gradle.sh SHADE_BUILD
 
           - name: Shade on Java 21
             group: SHADE_RUN
             upload_name: SHADE_RUN_21
             runtime_jdk: 21
-            setup: ./pulsar-build/run_integration_group_gradle.sh SHADE_BUILD
 
           - name: Shade on Java 24
             group: SHADE_RUN
             upload_name: SHADE_RUN_24
             runtime_jdk: 24
-            setup: ./pulsar-build/run_integration_group_gradle.sh SHADE_BUILD
 
           - name: Standalone
             group: STANDALONE
@@ -565,11 +541,9 @@ jobs:
           java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
 
       - name: Restore build outputs from build job
         uses: actions/download-artifact@v8
@@ -611,13 +585,6 @@ jobs:
       - name: Aggregate test reports to ./test-reports directory
         if: ${{ always() }}
         uses: ./.github/actions/copy-test-reports
-
-      - name: Publish Test Report
-        uses: apache/pulsar-test-infra/action-junit-report@master
-        if: ${{ always() }}
-        with:
-          report_paths: 'test-reports/TEST-*.xml'
-          annotate_only: 'true'
 
       - name: Upload test reports
         uses: actions/upload-artifact@v7
@@ -664,7 +631,6 @@ jobs:
     needs: ['preconditions', 'build-and-license-check']
     if: ${{ needs.preconditions.outputs.docs_only != 'true' }}
     env:
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
     steps:
       - name: checkout
@@ -687,11 +653,9 @@ jobs:
           java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
 
       - name: Restore build outputs from build job
         uses: actions/download-artifact@v8
@@ -702,7 +666,7 @@ jobs:
         run: tar xf gradle-build-outputs.tar
 
       - name: Build pulsar-test-latest-version Docker image
-        run: ./gradlew -Pdocker :tests:latest-version-image:dockerBuild
+        run: ./gradlew :tests:latest-version-image:dockerBuild
 
       - name: Check binary licenses
         run: |
@@ -757,7 +721,6 @@ jobs:
     env:
       JOB_NAME: CI - System - ${{ matrix.name }}
       PULSAR_TEST_IMAGE_NAME: apachepulsar/pulsar-test-latest-version:latest
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
     strategy:
       fail-fast: false
@@ -805,11 +768,9 @@ jobs:
           java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
 
       - name: Restore build outputs from build job
         uses: actions/download-artifact@v8
@@ -839,13 +800,6 @@ jobs:
       - name: Aggregate test reports to ./test-reports directory
         if: ${{ always() }}
         uses: ./.github/actions/copy-test-reports
-
-      - name: Publish Test Report
-        uses: apache/pulsar-test-infra/action-junit-report@master
-        if: ${{ always() }}
-        with:
-          report_paths: 'test-reports/TEST-*.xml'
-          annotate_only: 'true'
 
       - name: Upload test reports
         uses: actions/upload-artifact@v7
@@ -896,7 +850,6 @@ jobs:
       contents: read
       security-events: write
     env:
-      DEVELOCITY_ACCESS_KEY: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
       CI_JDK_MAJOR_VERSION: ${{ needs.preconditions.outputs.jdk_major_version }}
       CODEQL_LANGUAGE: java-kotlin
     steps:
@@ -921,11 +874,9 @@ jobs:
           java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+        uses: ./.github/actions/setup-gradle
         with:
-          develocity-injection-enabled: true
-          develocity-url: https://develocity.apache.org
-          add-job-summary: always
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
@@ -933,7 +884,7 @@ jobs:
           languages: ${{ env.CODEQL_LANGUAGE }}
 
       - name: Build Java code
-        run: ./gradlew assemble -PcoreModules
+        run: ./gradlew assemble
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

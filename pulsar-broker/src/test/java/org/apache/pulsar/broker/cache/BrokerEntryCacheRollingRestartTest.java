@@ -119,6 +119,7 @@ public class BrokerEntryCacheRollingRestartTest extends AbstractBrokerEntryCache
     }
 
     @Test(invocationCount = 5)
+    @SuppressWarnings("unchecked")
     public void testTailingReadsRollingRestart() throws Exception {
         // this description is showed in result CSV files
         String testConfigDescriptionInResult = cacheType.getDescription();
@@ -154,6 +155,7 @@ public class BrokerEntryCacheRollingRestartTest extends AbstractBrokerEntryCache
                 .create();
 
         // Create consumers in paused state with receiver queue size of 50
+        @SuppressWarnings({"unchecked", "rawtypes"})
         Consumer<Long>[] consumers = new Consumer[numConsumers];
         List<PulsarClient> consumerPulsarClients = new ArrayList<>();
         @Cleanup

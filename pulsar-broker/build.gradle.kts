@@ -18,6 +18,8 @@
  */
 
 plugins {
+    id("pulsar.java-conventions")
+    id("pulsar.test-certs-conventions")
     alias(libs.plugins.protobuf)
     alias(libs.plugins.lightproto)
 }
@@ -107,7 +109,6 @@ dependencies {
     testImplementation(project(path = ":managed-ledger", configuration = "testJar"))
     testImplementation(project(path = ":pulsar-metadata", configuration = "testJar"))
     testImplementation(project(path = ":pulsar-package-management:pulsar-package-core", configuration = "testJar"))
-    testImplementation(project(path = ":", configuration = "filteredBkServerTestJar"))
     testImplementation(libs.bookkeeper.common) { artifact { classifier = "tests" } }
     testImplementation(libs.zookeeper) { artifact { classifier = "tests" } }
     testImplementation(project(":pulsar-functions:pulsar-functions-local-runner-original"))
@@ -133,6 +134,11 @@ dependencies {
         exclude(group = "com.google.protobuf")
     }
 }
+
+// Ensure parent projects are configured before resolving cross-project task references.
+// Required for --configure-on-demand: the Kotlin DSL needs parent ClassLoaderScopes to be locked.
+evaluationDependsOn(":pulsar-io")
+evaluationDependsOn(":pulsar-functions")
 
 // NAR/JAR files needed by broker tests (mirrors Maven's maven-dependency-plugin config).
 tasks.withType<Test> {

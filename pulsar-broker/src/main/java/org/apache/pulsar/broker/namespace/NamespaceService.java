@@ -410,6 +410,7 @@ public class NamespaceService implements AutoCloseable {
      * @return true if the namespace was successfully registered, false otherwise
      * @throws PulsarServerException if an error occurs when registering the namespace
      */
+    @SuppressWarnings("deprecation")
     public boolean registerNamespace(NamespaceName nsname, boolean ensureOwned) throws PulsarServerException {
         try {
             // all pre-registered namespace is assumed to have bundles disabled
@@ -847,6 +848,7 @@ public class NamespaceService implements AutoCloseable {
         return pulsar.getLocalMetadataStore().exists(ServiceUnitUtils.path(bundle));
     }
 
+    @SuppressWarnings("deprecation")
     public CompletableFuture<Map<String, NamespaceOwnershipStatus>> getOwnedNameSpacesStatusAsync() {
        return pulsar.getPulsarResources().getNamespaceResources().getIsolationPolicies()
                .getIsolationDataPoliciesAsync(pulsar.getConfiguration().getClusterName())
@@ -1182,6 +1184,7 @@ public class NamespaceService implements AutoCloseable {
         return ownershipCache;
     }
 
+    @SuppressWarnings("deprecation")
     public Set<NamespaceBundle> getOwnedServiceUnits() {
         if (ExtensibleLoadManagerImpl.isLoadManagerExtensionEnabled(pulsar)) {
             ExtensibleLoadManagerImpl extensibleLoadManager = ExtensibleLoadManagerImpl.get(loadManager.get());
@@ -1550,7 +1553,7 @@ public class NamespaceService implements AutoCloseable {
             initializedByCurrentThread.setTrue();
             return topicsSupplier.get().thenApplyAsync(TopicList::filterSystemTopic, pulsar.getExecutor());
         });
-        if (initializedByCurrentThread.getValue()) {
+        if (initializedByCurrentThread.booleanValue()) {
             queryRes.whenComplete((ignore, ex) -> {
                 inProgressQueryUserTopics.remove(key, queryRes);
             });
@@ -1664,6 +1667,7 @@ public class NamespaceService implements AutoCloseable {
                 .thenApply(GetTopicsResult::getTopics);
     }
 
+    @SuppressWarnings("deprecation")
     public PulsarClientImpl getNamespaceClient(ClusterDataImpl cluster) {
         PulsarClientImpl client = namespaceClients.get(cluster);
         if (client != null) {

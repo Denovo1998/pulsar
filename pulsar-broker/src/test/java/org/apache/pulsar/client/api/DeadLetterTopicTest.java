@@ -562,6 +562,7 @@ public class DeadLetterTopicTest extends SharedPulsarBaseTest {
 
         checkConsumer.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 20000)
     public void testDeadLetterTopicHasOriginalInfo() throws Exception {
@@ -638,6 +639,7 @@ public class DeadLetterTopicTest extends SharedPulsarBaseTest {
         @Nullable
         private String field3;
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 20000)
     public void testAutoConsumeSchemaDeadLetter() throws Exception {
@@ -1603,6 +1605,7 @@ public class DeadLetterTopicTest extends SharedPulsarBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testCheckUnnecessaryGetPartitionedTopicMetadataWhenUseRetryAndDQL() {
         PulsarClientImpl client = mock(PulsarClientImpl.class);
         ClientConfigurationData clientConf = new ClientConfigurationData();

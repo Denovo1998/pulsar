@@ -97,6 +97,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
         });
     }
 
+    @SuppressWarnings("unchecked")
     private void clearAllTheLedgersOutdated(String topicName) throws Exception {
         PersistentTopic persistentTopic =
                 (PersistentTopic) getTopic(topicName, false).get().get();
@@ -108,6 +109,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
             return managedLedger.getLedgersInfo().size() == 1;
         });
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testGetLastMessageIdWhenLedgerEmpty() throws Exception {
@@ -142,6 +144,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
                 .readCompacted(true)
                 .subscribe();
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testGetLastMessageIdWhenNoNonEmptyLedgerExists() throws Exception {
@@ -178,6 +181,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
                 {false}
         };
     }
+    @SuppressWarnings("deprecation")
 
     @Test(dataProvider = "enabledBatch")
     public void testGetLastMessageIdBeforeCompaction(boolean enabledBatch) throws Exception {
@@ -212,6 +216,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
         consumer.close();
         producer.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(dataProvider = "enabledBatch")
     public void testGetLastMessageIdAfterCompaction(boolean enabledBatch) throws Exception {
@@ -248,6 +253,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
         consumer.close();
         producer.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(dataProvider = "enabledBatch")
     public void testGetLastMessageIdAfterCompactionWithCompression(boolean enabledBatch) throws Exception {
@@ -329,6 +335,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
         producer.close();
         reader.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(dataProvider = "enabledBatch")
     public void testGetLastMessageIdAfterCompactionEndWithNullMsg(boolean enabledBatch) throws Exception {
@@ -368,6 +375,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
         consumer.close();
         producer.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(dataProvider = "enabledBatch")
     public void testGetLastMessageIdAfterCompactionEndWithNullMsg2(boolean enabledBatch) throws Exception {
@@ -406,6 +414,7 @@ public class GetLastMessageIdCompactedTest extends SharedPulsarBaseTest {
         consumer.close();
         producer.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(dataProvider = "enabledBatch")
     public void testGetLastMessageIdAfterCompactionAllNullMsg(boolean enabledBatch) throws Exception {

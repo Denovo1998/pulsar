@@ -17,6 +17,10 @@
  * under the License.
  */
 
+plugins {
+    id("pulsar.java-conventions")
+}
+
 // Distribution module — no Java compilation needed
 tasks.named("compileJava") { enabled = false }
 tasks.named("compileTestJava") { enabled = false }
@@ -59,6 +63,15 @@ val offloaderDistTar by tasks.registering(Tar::class) {
     // NAR artifacts resolved automatically via the offloaderNars configuration
     from(offloaderNars) {
         into("${baseDir}/offloaders")
+    }
+}
+
+// Consumable configuration exposing the offloader distribution tarball
+val offloaderDistElements by configurations.creating {
+    isCanBeConsumed = true
+    isCanBeResolved = false
+    outgoing {
+        artifact(offloaderDistTar)
     }
 }
 
