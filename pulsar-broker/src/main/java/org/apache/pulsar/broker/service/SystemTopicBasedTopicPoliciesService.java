@@ -536,7 +536,7 @@ public class SystemTopicBasedTopicPoliciesService implements TopicPoliciesServic
                 }
                 return existingFuture;
             });
-            final var p = policiesFutureHolder.getValue();
+            final var p = policiesFutureHolder.get();
             if (!p.getLeft()) {
                 log.info("The future of {} has been removed from cache, retry getTopicPolicies again", namespace);
                 return getTopicPoliciesAsync(topicName, type);
@@ -565,7 +565,9 @@ public class SystemTopicBasedTopicPoliciesService implements TopicPoliciesServic
 
     @VisibleForTesting
     @NonNull CompletableFuture<Boolean> prepareInitPoliciesCacheAsync(@NonNull NamespaceName namespace) {
-        requireNonNull(namespace);
+        if (namespace == null) {
+            return FutureUtil.failedFuture(new NullPointerException("Expected NamespaceName should not be null"));
+        }
         if (closed.get()) {
             return CompletableFuture.completedFuture(false);
         }

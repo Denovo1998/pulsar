@@ -101,8 +101,8 @@ public class PersistentDispatcherFailoverConsumerTest {
 
     protected PulsarTestContext pulsarTestContext;
 
-    final String successTopicName = "persistent://part-perf/global/perf.t1/ptopic";
-    final String failTopicName = "persistent://part-perf/global/perf.t1/pfailTopic";
+    final String successTopicName = "persistent://part-perf/perf.t1/ptopic";
+    final String failTopicName = "persistent://part-perf/perf.t1/pfailTopic";
 
     @BeforeMethod
     public void setup() throws Exception {
@@ -171,6 +171,7 @@ public class PersistentDispatcherFailoverConsumerTest {
     }
 
     @AfterMethod(alwaysRun = true)
+    @SuppressWarnings("unchecked")
     public void shutdown() throws Exception {
         if (pulsarTestContext != null) {
             pulsarTestContext.close();
@@ -178,6 +179,7 @@ public class PersistentDispatcherFailoverConsumerTest {
         }
     }
 
+    @SuppressWarnings("unchecked")
     void setupMLAsyncCallbackMocks() {
         ledgerMock = mock(ManagedLedger.class);
         cursorMock = mock(ManagedCursorImpl.class);
@@ -464,6 +466,7 @@ public class PersistentDispatcherFailoverConsumerTest {
         return res.get();
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testAddRemoveConsumerNonPartitionedTopic() throws Exception {
         log.info("--- Starting PersistentDispatcherFailoverConsumerTest::testAddRemoveConsumerNonPartitionedTopic ---");

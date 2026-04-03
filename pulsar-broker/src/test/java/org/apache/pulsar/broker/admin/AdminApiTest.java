@@ -541,7 +541,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
 
         Map<String, NamespaceOwnershipStatus> nsMap = admin.brokers().getOwnedNamespaces("test", list.get(0));
         // since sla-monitor ns is not created nsMap.size() == 1 (for HeartBeat Namespace)
-        Assert.assertEquals(nsMap.size(), 2);
+        Assert.assertEquals(nsMap.size(), 1);
         for (String ns : nsMap.keySet()) {
             NamespaceOwnershipStatus nsStatus = nsMap.get(ns);
             if (ns.equals(
@@ -554,7 +554,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         }
 
         Map<String, NamespaceOwnershipStatus> nsMap2 = adminTls.brokers().getOwnedNamespaces("test", list.get(0));
-        Assert.assertEquals(nsMap2.size(), 2);
+        Assert.assertEquals(nsMap2.size(), 1);
 
         deleteNamespaceWithRetry("prop-xyz/ns1", false);
         admin.clusters().deleteCluster("test");
@@ -818,7 +818,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         admin.namespaces().createNamespace("prop-xyz/ns2", Set.of("test"));
 
         admin.namespaces().createNamespace("prop-xyz/ns3", 4);
-        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns3", Set.of("test"));
+        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns3", Set.of("test"), false);
         assertEquals(admin.namespaces().getPolicies("prop-xyz/ns3").bundles.getNumBundles(), 4);
         assertEquals(admin.namespaces().getPolicies("prop-xyz/ns3").bundles.getBoundaries().size(), 5);
 
@@ -917,6 +917,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         // otheradmin.namespaces().unload("prop-xyz/use/ns2");
     }
 
+    @SuppressWarnings("deprecation")
     @Test(dataProvider = "topicName")
     public void persistentTopics(String topicName) throws Exception {
         final String subName = topicName;
@@ -1012,6 +1013,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         assertEquals(admin.topics().getList("prop-xyz/ns1"), new ArrayList<>());
     }
 
+    @SuppressWarnings("deprecation")
     @Test(dataProvider = "topicName")
     public void testSkipHoleMessages(String topicName) throws Exception {
         final String subName = topicName;
@@ -1058,6 +1060,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         assertEquals(topicStats.getSubscriptions().get(subName).getMsgBacklog(), msgBacklog - skipNumber);
     }
 
+    @SuppressWarnings("deprecation")
     @Test(dataProvider = "topicType")
     public void testPartitionState(String topicType) throws Exception {
         final String namespace = "prop-xyz/ns1";
@@ -1103,6 +1106,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
     }
 
 
+    @SuppressWarnings("deprecation")
     @Test(dataProvider = "topicType")
     public void testNonPartitionState(String topicType) throws Exception {
         final String namespace = "prop-xyz/ns1";
@@ -1141,6 +1145,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         client.close();
     }
 
+    @SuppressWarnings("deprecation")
     @Test(dataProvider = "topicNamesForAllTypes")
     public void partitionedTopics(String topicType, String topicName) throws Exception {
         final String namespace = "prop-xyz/ns1";
@@ -1481,7 +1486,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
     public void testDeleteNamespaceBundle(Integer numBundles) throws Exception {
         deleteNamespaceWithRetry("prop-xyz/ns1", false);
         admin.namespaces().createNamespace("prop-xyz/ns1-bundles", numBundles);
-        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"));
+        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"), false);
 
         // since we have 2 brokers running, we try to let both of them acquire bundle ownership
         admin.lookups().lookupTopic("persistent://prop-xyz/ns1-bundles/ds1");
@@ -1492,7 +1497,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         assertEquals(admin.namespaces().getTopics("prop-xyz/ns1-bundles"), new ArrayList<>());
 
         deleteNamespaceWithRetry("prop-xyz/ns1-bundles", false);
-        assertEquals(admin.namespaces().getNamespaces("prop-xyz", "test"), new ArrayList<>());
+        assertEquals(admin.namespaces().getNamespaces("prop-xyz"), new ArrayList<>());
     }
 
     @Test
@@ -2109,7 +2114,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
     @Test(dataProvider = "numBundles")
     public void testNamespaceBundleUnload(Integer numBundles) throws Exception {
         admin.namespaces().createNamespace("prop-xyz/ns1-bundles", numBundles);
-        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"));
+        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"), false);
 
         assertEquals(admin.topics().getList("prop-xyz/ns1-bundles"), new ArrayList<>());
 
@@ -2157,6 +2162,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         admin.topics().delete("persistent://prop-xyz/ns1-bundles/ds2");
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testDeleteSubscription() throws Exception {
         final String subName = "test-sub";
@@ -2210,7 +2216,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
     @Test(dataProvider = "bundling")
     public void testClearBacklogOnNamespace(Integer numBundles) throws Exception {
         admin.namespaces().createNamespace("prop-xyz/ns1-bundles", numBundles);
-        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"));
+        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"), false);
 
         // create consumer and subscription
         @Cleanup
@@ -2288,7 +2294,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
     @Test(dataProvider = "bundling")
     public void testUnsubscribeOnNamespace(Integer numBundles) throws Exception {
         admin.namespaces().createNamespace("prop-xyz/ns1-bundles", numBundles);
-        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"));
+        admin.namespaces().setNamespaceReplicationClusters("prop-xyz/ns1-bundles", Set.of("test"), false);
 
         // create consumer and subscription
         Consumer<byte[]> consumer1 = pulsarClient.newConsumer().topic("persistent://prop-xyz/ns1-bundles/ds2")
@@ -2337,6 +2343,221 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
                 List.of("my-sub-2"));
         assertEquals(admin.topics().getSubscriptions("persistent://prop-xyz/ns1-bundles/ds1"),
                 new ArrayList<>());
+    }
+
+    @Test(dataProvider = "numBundles")
+    public void testUnsubscribeNamespaceBundleOnUnloadedBundle(Integer numBundles) throws Exception {
+        String namespace = "prop-xyz/ns-unsub-bundle";
+        admin.namespaces().createNamespace(namespace, numBundles);
+
+        String topic = "persistent://" + namespace + "/t1";
+        String subscription = "sub1";
+        String otherSubscription = "sub2";
+
+        Consumer<byte[]> consumer1 = pulsarClient.newConsumer()
+                .topic(topic)
+                .subscriptionName(subscription)
+                .subscribe();
+
+        Consumer<byte[]> consumer2 = pulsarClient.newConsumer()
+                .topic(topic)
+                .subscriptionName(otherSubscription)
+                .subscribe();
+
+        consumer1.close();
+        consumer2.close();
+
+        NamespaceBundle bundle =
+                pulsar.getNamespaceService().getNamespaceBundleFactory().getBundle(TopicName.get(topic));
+        admin.namespaces().unloadNamespaceBundle(namespace, bundle.getBundleRange());
+
+        Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(200, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertFalse(pulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                            "Bundle should not be owned by current broker");
+                    assertFalse(otherPulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                            "Bundle should not be owned by other broker");
+                });
+
+        admin.namespaces().unsubscribeNamespaceBundle(namespace, bundle.getBundleRange(), subscription);
+
+        List<String> subscriptions =
+                admin.topics().getSubscriptions(topic).stream().sorted().toList();
+        assertEquals(subscriptions, List.of(otherSubscription));
+    }
+
+    @Test(dataProvider = "numBundles")
+    public void testUnsubscribeNamespaceOnUnloadedBundle(Integer numBundles) throws Exception {
+        String namespace = "prop-xyz/ns-unsub-namespace";
+        admin.namespaces().createNamespace(namespace, numBundles);
+
+        String topic = "persistent://" + namespace + "/t1";
+        String subscription = "sub1";
+        String otherSubscription = "sub2";
+
+        Consumer<byte[]> consumer1 = pulsarClient.newConsumer()
+                .topic(topic)
+                .subscriptionName(subscription)
+                .subscribe();
+
+        Consumer<byte[]> consumer2 = pulsarClient.newConsumer()
+                .topic(topic)
+                .subscriptionName(otherSubscription)
+                .subscribe();
+
+        consumer1.close();
+        consumer2.close();
+
+        NamespaceBundle bundle =
+                pulsar.getNamespaceService().getNamespaceBundleFactory().getBundle(TopicName.get(topic));
+        admin.namespaces().unloadNamespaceBundle(namespace, bundle.getBundleRange());
+
+        Awaitility.await()
+                .atMost(30, TimeUnit.SECONDS)
+                .pollInterval(200, TimeUnit.MILLISECONDS)
+                .untilAsserted(() -> {
+                    assertFalse(pulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                            "Bundle should not be owned by current broker");
+                    assertFalse(otherPulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                            "Bundle should not be owned by other broker");
+                });
+
+        admin.namespaces().unsubscribeNamespace(namespace, subscription);
+
+        List<String> subscriptions =
+                admin.topics().getSubscriptions(topic).stream().sorted().toList();
+        assertEquals(subscriptions, List.of(otherSubscription));
+    }
+
+    @Test(dataProvider = "numBundles")
+    public void testUnsubscribeNamespaceOnUnloadedBundleWithPartitionedTopic(Integer numBundles) throws Exception {
+        String namespace = "prop-xyz/ns-unsub-partitioned";
+        admin.namespaces().createNamespace(namespace, numBundles);
+
+        String topic = "persistent://" + namespace + "/pt";
+        int partitions = 3;
+        admin.topics().createPartitionedTopic(topic, partitions);
+
+        String subscription = "sub1";
+        String otherSubscription = "sub2";
+
+        Consumer<byte[]> consumer1 = pulsarClient.newConsumer()
+                .topic(topic)
+                .subscriptionName(subscription)
+                .subscribe();
+
+        Consumer<byte[]> consumer2 = pulsarClient.newConsumer()
+                .topic(topic)
+                .subscriptionName(otherSubscription)
+                .subscribe();
+
+        consumer1.close();
+        consumer2.close();
+
+        Set<NamespaceBundle> bundles = new HashSet<>();
+        for (int i = 0; i < partitions; i++) {
+            String partitionTopic = TopicName.get(topic).getPartition(i).toString();
+            bundles.add(pulsar.getNamespaceService().getNamespaceBundleFactory()
+                    .getBundle(TopicName.get(partitionTopic)));
+        }
+        for (NamespaceBundle bundle : bundles) {
+            admin.namespaces().unloadNamespaceBundle(namespace, bundle.getBundleRange());
+        }
+
+        for (NamespaceBundle bundle : bundles) {
+            Awaitility.await()
+                    .atMost(30, TimeUnit.SECONDS)
+                    .pollInterval(200, TimeUnit.MILLISECONDS)
+                    .untilAsserted(() -> {
+                        assertFalse(pulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                                "Bundle should not be owned by current broker");
+                        assertFalse(otherPulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                                "Bundle should not be owned by other broker");
+                    });
+        }
+
+        admin.namespaces().unsubscribeNamespace(namespace, subscription);
+
+        for (int i = 0; i < partitions; i++) {
+            String partitionTopic = TopicName.get(topic).getPartition(i).toString();
+            List<String> subs = admin.topics().getSubscriptions(partitionTopic).stream().sorted().toList();
+            assertEquals(subs, List.of(otherSubscription));
+        }
+    }
+
+    @Test
+    public void testUnsubscribeNamespaceOnUnloadedBundleWithMultiTopicCrossBundle() throws Exception {
+        String namespace = "prop-xyz/ns-unsub-cross-bundle";
+        admin.namespaces().createNamespace(namespace, 4);
+
+        String subscription = "sub1";
+        String otherSubscription = "sub2";
+
+        String topic1 = null;
+        String topic2 = null;
+        NamespaceBundle bundle1 = null;
+        NamespaceBundle bundle2 = null;
+        for (int i = 0; i < 50; i++) {
+            String candidate = "persistent://" + namespace + "/t-" + i;
+            @Cleanup
+            Consumer<byte[]> c = pulsarClient.newConsumer()
+                    .topic(candidate)
+                    .subscriptionName(subscription)
+                    .subscribe();
+            c.close();
+            NamespaceBundle bundle =
+                    pulsar.getNamespaceService().getNamespaceBundleFactory().getBundle(TopicName.get(candidate));
+            if (topic1 == null) {
+                topic1 = candidate;
+                bundle1 = bundle;
+                continue;
+            }
+            if (!bundle.equals(bundle1)) {
+                topic2 = candidate;
+                bundle2 = bundle;
+                break;
+            }
+        }
+        assertNotNull(topic1);
+        assertNotNull(topic2);
+        assertNotNull(bundle1);
+        assertNotNull(bundle2);
+
+        Consumer<byte[]> consumer1 = pulsarClient.newConsumer()
+                .topic(topic1)
+                .subscriptionName(otherSubscription)
+                .subscribe();
+
+        Consumer<byte[]> consumer2 = pulsarClient.newConsumer()
+                .topic(topic2)
+                .subscriptionName(otherSubscription)
+                .subscribe();
+        consumer1.close();
+        consumer2.close();
+
+        admin.namespaces().unloadNamespaceBundle(namespace, bundle1.getBundleRange());
+        admin.namespaces().unloadNamespaceBundle(namespace, bundle2.getBundleRange());
+
+        for (NamespaceBundle bundle : List.of(bundle1, bundle2)) {
+            Awaitility.await()
+                    .atMost(30, TimeUnit.SECONDS)
+                    .pollInterval(200, TimeUnit.MILLISECONDS)
+                    .untilAsserted(() -> {
+                        assertFalse(pulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                                "Bundle should not be owned by current broker");
+                        assertFalse(otherPulsar.getNamespaceService().isServiceUnitOwned(bundle),
+                                "Bundle should not be owned by other broker");
+                    });
+        }
+
+        admin.namespaces().unsubscribeNamespace(namespace, subscription);
+
+        List<String> subs1 = admin.topics().getSubscriptions(topic1).stream().sorted().toList();
+        List<String> subs2 = admin.topics().getSubscriptions(topic2).stream().sorted().toList();
+        assertEquals(subs1, List.of(otherSubscription));
+        assertEquals(subs2, List.of(otherSubscription));
     }
 
     private List<MessageId> publishMessagesOnPersistentTopic(String topicName, int messages) throws Exception {
@@ -2756,6 +2977,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         admin.topics().deletePartitionedTopic(topicName);
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void persistentTopicsInvalidCursorReset() throws Exception {
         admin.namespaces().setRetention("prop-xyz/ns1", new RetentionPolicies(10, 10));
@@ -2844,6 +3066,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test
     public void testPersistentTopicsExpireMessages() throws Exception {
         // Force to create a topic
@@ -2931,6 +3154,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
         consumer3.close();
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testPersistentTopicsExpireMessagesInvalidPartitionIndex() throws Exception {
         // Create a topic
@@ -2963,6 +3187,7 @@ public class AdminApiTest extends MockedPulsarServiceBaseTest {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test
     public void testPersistentTopicExpireMessageOnPartitionTopic() throws Exception {
 

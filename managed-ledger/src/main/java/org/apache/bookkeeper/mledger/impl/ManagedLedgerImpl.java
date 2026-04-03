@@ -48,7 +48,6 @@ import java.util.Random;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -128,11 +127,11 @@ import org.apache.bookkeeper.mledger.impl.MetaStore.MetaStoreCallback;
 import org.apache.bookkeeper.mledger.impl.cache.EntryCache;
 import org.apache.bookkeeper.mledger.intercept.ManagedLedgerInterceptor;
 import org.apache.bookkeeper.mledger.offload.OffloadUtils;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo.LedgerInfo;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.NestedPositionInfo;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.OffloadContext;
+import org.apache.bookkeeper.mledger.proto.KeyValue;
+import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo;
+import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo.LedgerInfo;
+import org.apache.bookkeeper.mledger.proto.NestedPositionInfo;
+import org.apache.bookkeeper.mledger.proto.OffloadContext;
 import org.apache.bookkeeper.mledger.util.CallbackMutex;
 import org.apache.bookkeeper.mledger.util.Futures;
 import org.apache.bookkeeper.mledger.util.ManagedLedgerImplUtils;
@@ -396,7 +395,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         this.entryCache = factory.getEntryCacheManager().getEntryCache(this);
         this.waitingCursors = Queues.newConcurrentLinkedQueue();
         this.waitingEntryCallBacks = Queues.newConcurrentLinkedQueue();
-        this.uninitializedCursors = new HashMap();
+        this.uninitializedCursors = new HashMap<>();
         this.clock = config.getClock();
 
         // Get the next rollover time. Add a random value upto 5% to avoid rollover multiple ledgers at the same time
@@ -430,14 +429,15 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                             PositionFactory.create(terminatedPosition.getLedgerId(), terminatedPosition.getEntryId());
                     log.info("[{}] Recovering managed ledger terminated at {}", name, lastConfirmedEntry);
                 }
-                for (LedgerInfo ls : mlInfo.getLedgerInfoList()) {
+                for (int i = 0; i < mlInfo.getLedgerInfosCount(); i++) {
+                    LedgerInfo ls = mlInfo.getLedgerInfoAt(i);
                     ledgers.put(ls.getLedgerId(), ls);
                 }
 
                 if (mlInfo.getPropertiesCount() > 0) {
-                    propertiesMap = new HashMap();
+                    propertiesMap = new HashMap<>();
                     for (int i = 0; i < mlInfo.getPropertiesCount(); i++) {
-                        MLDataFormats.KeyValue property = mlInfo.getProperties(i);
+                        KeyValue property = mlInfo.getPropertyAt(i);
                         propertiesMap.put(property.getKey(), property.getValue());
                     }
                 }
@@ -459,9 +459,9 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                 if (State.Terminated.equals(state)) {
                                     currentLedger = lh;
                                 }
-                                LedgerInfo info = LedgerInfo.newBuilder().setLedgerId(id)
+                                LedgerInfo info = new LedgerInfo().setLedgerId(id)
                                         .setEntries(lh.getLastAddConfirmed() + 1).setSize(lh.getLength())
-                                        .setTimestamp(clock.millis()).build();
+                                        .setTimestamp(clock.millis());
                                 ledgers.put(id, info);
                                 if (managedLedgerInterceptor != null) {
                                     managedLedgerInterceptor
@@ -631,7 +631,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     }
                 }
 
-                LedgerInfo info = LedgerInfo.newBuilder().setLedgerId(lh.getId()).setTimestamp(0).build();
+                LedgerInfo info = new LedgerInfo().setLedgerId(lh.getId()).setTimestamp(0);
                 ledgers.put(lh.getId(), info);
 
                 // Save it back to ensure all nodes exist
@@ -1426,14 +1426,19 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         CompletableFuture<Void> f = new CompletableFuture<>();
         transformLedgerInfo(ledgerId,
                 oldInfo -> {
-                    List<MLDataFormats.KeyValue> oldProperties = oldInfo.getPropertiesList();
                     Map<String, String> newPropertiesMap = new HashMap<>();
-                    oldProperties.forEach(kv -> newPropertiesMap.put(kv.getKey(), kv.getValue()));
+                    for (int i = 0; i < oldInfo.getPropertiesCount(); i++) {
+                        KeyValue kv = oldInfo.getPropertyAt(i);
+                        newPropertiesMap.put(kv.getKey(), kv.getValue());
+                    }
                     newPropertiesMap.put(key, value);
-                    List<MLDataFormats.KeyValue> newProperties = newPropertiesMap.entrySet().stream()
-                            .map(e -> MLDataFormats.KeyValue.newBuilder()
-                                    .setKey(e.getKey()).setValue(e.getValue()).build()).toList();
-                    return oldInfo.toBuilder().clearProperties().addAllProperties(newProperties).build();
+                    List<KeyValue> newProperties = newPropertiesMap.entrySet().stream()
+                            .map(e -> new KeyValue().setKey(e.getKey()).setValue(e.getValue())).toList();
+                    LedgerInfo copy = new LedgerInfo();
+                    copy.copyFrom(oldInfo);
+                    copy.clearProperties();
+                    copy.addAllProperties(newProperties);
+                    return copy;
                 })
                 .thenAccept(v -> f.complete(null))
                 .exceptionally(t -> {
@@ -1461,14 +1466,19 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         CompletableFuture<Void> f = new CompletableFuture<>();
         transformLedgerInfo(ledgerId,
                 oldInfo -> {
-                    List<MLDataFormats.KeyValue> oldProperties = oldInfo.getPropertiesList();
                     Map<String, String> newPropertiesMap = new HashMap<>();
-                    oldProperties.forEach(kv -> newPropertiesMap.put(kv.getKey(), kv.getValue()));
+                    for (int i = 0; i < oldInfo.getPropertiesCount(); i++) {
+                        KeyValue kv = oldInfo.getPropertyAt(i);
+                        newPropertiesMap.put(kv.getKey(), kv.getValue());
+                    }
                     newPropertiesMap.remove(key);
-                    List<MLDataFormats.KeyValue> newProperties = newPropertiesMap.entrySet().stream()
-                            .map(e -> MLDataFormats.KeyValue.newBuilder()
-                                    .setKey(e.getKey()).setValue(e.getValue()).build()).toList();
-                    return oldInfo.toBuilder().clearProperties().addAllProperties(newProperties).build();
+                    List<KeyValue> newProperties = newPropertiesMap.entrySet().stream()
+                            .map(e -> new KeyValue().setKey(e.getKey()).setValue(e.getValue())).toList();
+                    LedgerInfo copy = new LedgerInfo();
+                    copy.copyFrom(oldInfo);
+                    copy.clearProperties();
+                    copy.addAllProperties(newProperties);
+                    return copy;
                 })
                 .thenAccept(v -> f.complete(null))
                 .exceptionally(t -> {
@@ -1495,7 +1505,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         if (li.getPropertiesCount() <= 0) {
             return CompletableFuture.completedFuture(null);
         }
-        for (MLDataFormats.KeyValue kv : li.getPropertiesList()) {
+        for (int i = 0; i < li.getPropertiesCount(); i++) {
+            KeyValue kv = li.getPropertyAt(i);
             if (kv.getKey().equals(key)) {
                 return CompletableFuture.completedFuture(kv.getValue());
             }
@@ -1689,7 +1700,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
     private void closeAllCursors(CloseCallback callback, final Object ctx) {
         // Close all cursors in parallel
-        List<CompletableFuture<Void>> futures = new ArrayList();
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (ManagedCursor cursor : cursors) {
             Futures.CloseFuture closeFuture = new Futures.CloseFuture();
             cursor.asyncClose(closeFuture, null);
@@ -1743,7 +1754,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             lastLedgerCreationFailureTimestamp = clock.millis();
         } else {
             log.info("[{}] Created new ledger {}", name, lh.getId());
-            LedgerInfo newLedger = LedgerInfo.newBuilder().setLedgerId(lh.getId()).setTimestamp(0).build();
+            LedgerInfo newLedger = new LedgerInfo().setLedgerId(lh.getId()).setTimestamp(0);
             final MetaStoreCallback<Void> cb = new MetaStoreCallback<Void>() {
                 @Override
                 public void operationComplete(Void v, Stat stat) {
@@ -1948,8 +1959,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             log.debug("[{}] Ledger has been closed id={} entries={}", name, lh.getId(), entriesInLedger);
         }
         if (entriesInLedger > 0) {
-            LedgerInfo info = LedgerInfo.newBuilder().setLedgerId(lh.getId()).setEntries(entriesInLedger)
-                    .setSize(lh.getLength()).setTimestamp(clock.millis()).build();
+            LedgerInfo info = new LedgerInfo().setLedgerId(lh.getId()).setEntries(entriesInLedger)
+                    .setSize(lh.getLength()).setTimestamp(clock.millis());
             ledgers.put(lh.getId(), info);
         } else {
             // The last ledger was empty, so we can discard it
@@ -1994,6 +2005,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @VisibleForTesting
+    @SuppressWarnings("deprecation")
     @Override
     public void rollCurrentLedgerIfFull() {
         log.info("[{}] Start checking if current ledger is full", name);
@@ -2222,11 +2234,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     && config.getLedgerOffloader().getOffloadPolicies()
                     .getManagedLedgerOffloadedReadPriority() == OffloadedReadPriority.BOOKKEEPER_FIRST
                     && info != null && info.hasOffloadContext()
-                    && !info.getOffloadContext().getBookkeeperDeleted()) {
+                    && !info.getOffloadContext().isBookkeeperDeleted()) {
                 openFuture = bookKeeper.newOpenLedgerOp().withRecovery(!isReadOnly()).withLedgerId(ledgerId)
                         .withDigestType(config.getDigestType()).withPassword(config.getPassword()).execute();
 
-            } else if (info != null && info.hasOffloadContext() && info.getOffloadContext().getComplete()) {
+            } else if (info != null && info.hasOffloadContext() && info.getOffloadContext().isComplete()) {
 
                 UUID uid = new UUID(info.getOffloadContext().getUidMsb(), info.getOffloadContext().getUidLsb());
                 // TODO: improve this to load ledger offloader by driver name recorded in metadata
@@ -2856,7 +2868,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             final long now = System.currentTimeMillis();
             sizeSummed += size;
 
-            final boolean alreadyOffloaded = info.hasOffloadContext() && info.getOffloadContext().getComplete();
+            final boolean alreadyOffloaded = info.hasOffloadContext() && info.getOffloadContext().isComplete();
             if (alreadyOffloaded) {
                 alreadyOffloadedSize += size;
             } else {
@@ -2896,7 +2908,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
     boolean isOffloadedNeedsDelete(OffloadContext offload, Optional<OffloadPolicies> offloadPolicies) {
         long elapsedMs = clock.millis() - offload.getTimestamp();
-        return offloadPolicies.filter(policies -> offload.getComplete() && !offload.getBookkeeperDeleted()
+        return offloadPolicies.filter(policies -> offload.isComplete() && !offload.isBookkeeperDeleted()
                 && policies.getManagedLedgerOffloadDeletionLagInMillis() != null
                 && policies.getManagedLedgerOffloadDeletionLagInMillis() >= 0
                 && elapsedMs > policies.getManagedLedgerOffloadDeletionLagInMillis()).isPresent();
@@ -3013,7 +3025,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
             long slowestReaderLedgerId = -1;
             final LazyLoadableValue<Long> slowestNonDurationLedgerId =
-                    new LazyLoadableValue(() -> getTheSlowestNonDurationReadPosition().getLedgerId());
+                    new LazyLoadableValue<>(() -> getTheSlowestNonDurationReadPosition().getLedgerId());
             final long retentionSizeInMB = config.getRetentionSizeInMB();
             final long retentionTimeMs = config.getRetentionTimeMillis();
             final long totalSizeOfML = TOTAL_SIZE_UPDATER.get(this);
@@ -3140,14 +3152,15 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             doDeleteLedgers(ledgersToDelete);
 
             for (LedgerInfo ls : offloadedLedgersToDelete) {
-                LedgerInfo.Builder newInfoBuilder = ls.toBuilder();
-                newInfoBuilder.getOffloadContextBuilder().setBookkeeperDeleted(true);
+                LedgerInfo newInfo = new LedgerInfo();
+                newInfo.copyFrom(ls);
+                newInfo.setOffloadContext().setBookkeeperDeleted(true);
                 String driverName = OffloadUtils.getOffloadDriverName(ls,
                         config.getLedgerOffloader().getOffloadDriverName());
                 Map<String, String> driverMetadata = OffloadUtils.getOffloadDriverMetadata(ls,
                         config.getLedgerOffloader().getOffloadDriverMetadata());
-                OffloadUtils.setOffloadDriverMetadata(newInfoBuilder, driverName, driverMetadata);
-                ledgers.put(ls.getLedgerId(), newInfoBuilder.build());
+                OffloadUtils.setOffloadDriverMetadata(newInfo, driverName, driverMetadata);
+                ledgers.put(ls.getLedgerId(), newInfo);
             }
 
             if (log.isDebugEnabled()) {
@@ -3406,7 +3419,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     private void asyncDeleteLedger(long ledgerId, LedgerInfo info) {
-        if (!info.getOffloadContext().getBookkeeperDeleted()) {
+        if (!info.getOffloadContext().isBookkeeperDeleted()) {
             // only delete if it hasn't been previously deleted for offload
             asyncDeleteLedger(ledgerId, DEFAULT_LEDGER_DELETE_RETRIES);
         }
@@ -3476,7 +3489,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
     }
 
-    @SuppressWarnings("checkstyle:fallthrough")
+    @SuppressWarnings({"checkstyle:fallthrough", "fallthrough"})
     private void deleteAllLedgers(DeleteLedgerCallback callback, Object ctx) {
         List<LedgerInfo> ledgers = Lists.newArrayList(ManagedLedgerImpl.this.ledgers.values());
         AtomicInteger ledgersToDelete = new AtomicInteger(ledgers.size());
@@ -3495,7 +3508,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 case Code.NoSuchLedgerExistsException:
                 case Code.NoSuchLedgerExistsOnMetadataServerException:
                     log.warn("[{}] Ledger {} not found when deleting it", name, ls.getLedgerId());
-                    // Continue anyway
+                    // falls through
 
                 case BKException.Code.OK:
                     if (ledgersToDelete.decrementAndGet() == 0) {
@@ -3615,7 +3628,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             for (LedgerInfo ls : ledgers.headMap(current).values()) {
                 if (requestOffloadTo.getLedgerId() > ls.getLedgerId()) {
                     // don't offload if ledger has already been offloaded, or is empty
-                    if (!ls.getOffloadContext().getComplete() && ls.getSize() > 0) {
+                    if (!ls.getOffloadContext().isComplete() && ls.getSize() > 0) {
                         ledgersToOffload.add(ls);
                     }
                 } else {
@@ -3754,6 +3767,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     };
 
     static class OffloadConflict extends ManagedLedgerException {
+        private static final long serialVersionUID = 1L;
+
         OffloadConflict(String msg) {
             super(msg);
         }
@@ -3838,16 +3853,17 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                                name,
                                                scheduledExecutor);
                                        }
-                                       LedgerInfo.Builder builder = oldInfo.toBuilder();
-                                       builder.getOffloadContextBuilder()
+                                       LedgerInfo newInfo = new LedgerInfo();
+                                       newInfo.copyFrom(oldInfo);
+                                       newInfo.setOffloadContext()
                                            .setUidMsb(uuid.getMostSignificantBits())
                                            .setUidLsb(uuid.getLeastSignificantBits());
                                        OffloadUtils.setOffloadDriverMetadata(
-                                           builder,
+                                           newInfo,
                                            offloadDriverName,
                                            offloadDriverMetadata
                                        );
-                                       return builder.build();
+                                       return newInfo;
                                    })
             .whenComplete((result, exception) -> {
                     if (exception != null) {
@@ -3866,8 +3882,9 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                        UUID existingUuid = new UUID(oldInfo.getOffloadContext().getUidMsb(),
                                                                     oldInfo.getOffloadContext().getUidLsb());
                                        if (existingUuid.equals(uuid)) {
-                                           LedgerInfo.Builder builder = oldInfo.toBuilder();
-                                           builder.getOffloadContextBuilder()
+                                           LedgerInfo newInfo = new LedgerInfo();
+                                           newInfo.copyFrom(oldInfo);
+                                           newInfo.setOffloadContext()
                                                .setTimestamp(clock.millis())
                                                .setComplete(true);
 
@@ -3876,11 +3893,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                            Map<String, String> driverMetadata = OffloadUtils.getOffloadDriverMetadata(
                                                oldInfo, config.getLedgerOffloader().getOffloadDriverMetadata());
                                            OffloadUtils.setOffloadDriverMetadata(
-                                               builder,
+                                               newInfo,
                                                driverName,
                                                driverMetadata
                                            );
-                                           return builder.build();
+                                           return newInfo;
                                        } else {
                                            throw new OffloadConflict(
                                                    "Existing UUID(" + existingUuid + ") in metadata for offload"
@@ -4371,29 +4388,31 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     private ManagedLedgerInfo getManagedLedgerInfo(LedgerInfo newLedger) {
-        ManagedLedgerInfo.Builder mlInfo = ManagedLedgerInfo.newBuilder().addAllLedgerInfo(ledgers.values())
-                .addLedgerInfo(newLedger);
+        ManagedLedgerInfo mlInfo = new ManagedLedgerInfo();
+        mlInfo.addAllLedgerInfos(ledgers.values());
+        mlInfo.addLedgerInfo().copyFrom(newLedger);
         return buildManagedLedgerInfo(mlInfo);
     }
     private ManagedLedgerInfo buildManagedLedgerInfo(Map<Long, LedgerInfo> ledgers) {
-        ManagedLedgerInfo.Builder mlInfo = ManagedLedgerInfo.newBuilder().addAllLedgerInfo(ledgers.values());
+        ManagedLedgerInfo mlInfo = new ManagedLedgerInfo();
+        mlInfo.addAllLedgerInfos(ledgers.values());
         return buildManagedLedgerInfo(mlInfo);
     }
 
-    private ManagedLedgerInfo buildManagedLedgerInfo(ManagedLedgerInfo.Builder mlInfo) {
+    private ManagedLedgerInfo buildManagedLedgerInfo(ManagedLedgerInfo mlInfo) {
         if (state == State.Terminated) {
-            mlInfo.setTerminatedPosition(NestedPositionInfo.newBuilder().setLedgerId(lastConfirmedEntry.getLedgerId())
-                    .setEntryId(lastConfirmedEntry.getEntryId()));
+            mlInfo.setTerminatedPosition()
+                    .setLedgerId(lastConfirmedEntry.getLedgerId())
+                    .setEntryId(lastConfirmedEntry.getEntryId());
         }
         if (managedLedgerInterceptor != null) {
             managedLedgerInterceptor.onUpdateManagedLedgerInfo(propertiesMap);
         }
         for (Map.Entry<String, String> property : propertiesMap.entrySet()) {
-            mlInfo.addProperties(MLDataFormats.KeyValue.newBuilder()
-                    .setKey(property.getKey()).setValue(property.getValue()));
+            mlInfo.addProperty().setKey(property.getKey()).setValue(property.getValue());
         }
 
-        return mlInfo.build();
+        return mlInfo;
     }
 
     /**
@@ -4515,22 +4534,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         }
     }
 
-    private static boolean isLedgerNotExistException(int rc) {
-        switch (rc) {
-            case Code.NoSuchLedgerExistsException:
-            case Code.NoSuchLedgerExistsOnMetadataServerException:
-                return true;
-
-            default:
-                return false;
-        }
-    }
-
     public static ManagedLedgerException createManagedLedgerException(int bkErrorCode) {
         if (bkErrorCode == BKException.Code.TooManyRequestsException) {
             return new TooManyRequestsException("Too many request error from bookies");
         } else if (isBkErrorNotRecoverable(bkErrorCode)) {
-            if (isLedgerNotExistException(bkErrorCode)) {
+            if (isNoSuchLedgerExistsException(bkErrorCode)) {
                 return new LedgerNotExistException(BKException.getMessage(bkErrorCode));
             } else {
                 return new NonRecoverableLedgerException(BKException.getMessage(bkErrorCode));
@@ -4541,16 +4549,21 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     public static ManagedLedgerException createManagedLedgerException(Throwable t) {
-        if (t instanceof org.apache.bookkeeper.client.api.BKException) {
-            return createManagedLedgerException(((org.apache.bookkeeper.client.api.BKException) t).getCode());
-        } else if (t instanceof ManagedLedgerException) {
-            return (ManagedLedgerException) t;
-        } else if (t instanceof CompletionException
-                && !(t.getCause() instanceof CompletionException) /* check to avoid stackoverlflow */) {
-            return createManagedLedgerException(t.getCause());
+        if (t == null) {
+            return new ManagedLedgerException("Unknown exception");
+        }
+        Throwable cause = FutureUtil.unwrapCompletionException(t);
+        if (cause == null) {
+            log.error("Exception with null cause for ManagedLedgerException.", t);
+            return new ManagedLedgerException("Unknown exception", t);
+        }
+        if (cause instanceof org.apache.bookkeeper.client.api.BKException) {
+            return createManagedLedgerException(((org.apache.bookkeeper.client.api.BKException) cause).getCode());
+        } else if (cause instanceof ManagedLedgerException) {
+            return (ManagedLedgerException) cause;
         } else {
-            log.error("Unknown exception for ManagedLedgerException.", t);
-            return new ManagedLedgerException("Other exception", t);
+            log.error("Unknown exception for ManagedLedgerException.", cause);
+            return new ManagedLedgerException("Other exception", cause);
         }
     }
 
@@ -4595,7 +4608,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             return;
         }
 
-        ScheduledFuture timeoutChecker = scheduledExecutor.schedule(() -> {
+        ScheduledFuture<?> timeoutChecker = scheduledExecutor.schedule(() -> {
             if (!ledgerFutureHook.isDone()
                     && ledgerFutureHook.completeExceptionally(new TimeoutException(name + " Create ledger timeout"))) {
                 if (log.isDebugEnabled()) {
@@ -4622,10 +4635,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      * check if ledger-op task is already completed by timeout-task. If completed then delete the created ledger
      * @return
      */
+    @SuppressWarnings("unchecked")
     protected boolean checkAndCompleteLedgerOpTask(int rc, LedgerHandle lh, Object ctx) {
         if (ctx instanceof CompletableFuture) {
             // ledger-creation is already timed out and callback is already completed so, delete this ledger and return.
-            if (((CompletableFuture) ctx).complete(lh) || rc == BKException.Code.TimeoutException) {
+            if (((CompletableFuture<LedgerHandle>) ctx).complete(lh) || rc == BKException.Code.TimeoutException) {
                 return false;
             } else {
                 if (rc == BKException.Code.OK) {
@@ -4700,7 +4714,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     public long getOffloadedSize() {
         long offloadedSize = 0;
         for (LedgerInfo li : ledgers.values()) {
-            if (li.hasOffloadContext() && li.getOffloadContext().getComplete()) {
+            if (li.hasOffloadContext() && li.getOffloadContext().isComplete()) {
                 offloadedSize += li.getSize();
             }
         }
@@ -4849,7 +4863,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     // after the managed ledger is deleted.
     private CompletableFuture<Void> asyncTruncate(boolean ignoreCursorFailure) {
 
-        final List<CompletableFuture<Void>> futures = new ArrayList();
+        final List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (ManagedCursor cursor : cursors) {
             final CompletableFuture<Void> future = new CompletableFuture<>();
             cursor.asyncClearBacklog(new AsyncCallbacks.ClearBacklogCallback() {
@@ -4870,7 +4884,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             }, null);
             futures.add(future);
         }
-        CompletableFuture<Void> future = new CompletableFuture();
+        CompletableFuture<Void> future = new CompletableFuture<>();
         FutureUtil.waitForAll(futures).thenAccept(p -> {
             internalTrimLedgers(true, future);
         }).exceptionally(e -> {
@@ -4902,7 +4916,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         stats.lastConfirmedEntry = this.getLastConfirmedEntry().toString();
         stats.state = this.getState().toString();
 
-        stats.cursors = new HashMap();
+        stats.cursors = new HashMap<>();
         this.getCursors().forEach(c -> {
             ManagedCursorImpl cursor = (ManagedCursorImpl) c;
             PersistentTopicInternalStats.CursorStats cs = new PersistentTopicInternalStats.CursorStats();
@@ -4928,7 +4942,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         List<LedgerInfo> ledgersInfos = new ArrayList<>(this.getLedgersInfo().values());
 
         // add asynchronous metadata retrieval operations to a hashmap
-        Map<Long, CompletableFuture<LedgerMetadata>> ledgerMetadataFutures = new HashMap();
+        Map<Long, CompletableFuture<LedgerMetadata>> ledgerMetadataFutures = new HashMap<>();
         if (includeLedgerMetadata) {
             ledgersInfos.forEach(li -> {
                 long ledgerId = li.getLedgerId();
@@ -4963,7 +4977,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                         info.ledgerId = li.getLedgerId();
                         info.entries = li.getEntries();
                         info.size = li.getSize();
-                        info.offloaded = li.hasOffloadContext() && li.getOffloadContext().getComplete();
+                        info.offloaded = li.hasOffloadContext() && li.getOffloadContext().isComplete();
                         if (includeLedgerMetadata) {
                             // lookup metadata from the hashmap which contains completed async operations
                             LedgerMetadata lm = ledgerMetadataFutures.get(li.getLedgerId()).getNow(null);
@@ -4982,7 +4996,8 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                         }
                         if (li.getPropertiesCount() > 0) {
                             Map<String, String> properties = new HashMap<>(li.getPropertiesCount());
-                            for (MLDataFormats.KeyValue kv : li.getPropertiesList()) {
+                            for (int i = 0; i < li.getPropertiesCount(); i++) {
+                                KeyValue kv = li.getPropertyAt(i);
                                 properties.put(kv.getKey(), kv.getValue());
                             }
                             info.properties = properties;

@@ -36,10 +36,10 @@ import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.util.Backoff;
 import org.apache.bookkeeper.common.util.Retries;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.KeyValue;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo.LedgerInfo;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.OffloadContext;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.OffloadDriverMetadata;
+import org.apache.bookkeeper.mledger.proto.KeyValue;
+import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo.LedgerInfo;
+import org.apache.bookkeeper.mledger.proto.OffloadContext;
+import org.apache.bookkeeper.mledger.proto.OffloadDriverMetadata;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.DataFormats;
 
@@ -49,13 +49,16 @@ public final class OffloadUtils {
     private OffloadUtils() {}
 
     public static Map<String, String> getOffloadDriverMetadata(LedgerInfo ledgerInfo) {
-        Map<String, String> metadata = new HashMap();
+        Map<String, String> metadata = new HashMap<>();
         if (ledgerInfo.hasOffloadContext()) {
             OffloadContext ctx = ledgerInfo.getOffloadContext();
             if (ctx.hasDriverMetadata()) {
                 OffloadDriverMetadata driverMetadata = ctx.getDriverMetadata();
                 if (driverMetadata.getPropertiesCount() > 0) {
-                    driverMetadata.getPropertiesList().forEach(kv -> metadata.put(kv.getKey(), kv.getValue()));
+                    for (int i = 0; i < driverMetadata.getPropertiesCount(); i++) {
+                        KeyValue kv = driverMetadata.getPropertyAt(i);
+                        metadata.put(kv.getKey(), kv.getValue());
+                    }
                 }
             }
         }
@@ -69,8 +72,11 @@ public final class OffloadUtils {
             if (ctx.hasDriverMetadata()) {
                 OffloadDriverMetadata driverMetadata = ctx.getDriverMetadata();
                 if (driverMetadata.getPropertiesCount() > 0) {
-                    Map<String, String> metadata = new HashMap();
-                    driverMetadata.getPropertiesList().forEach(kv -> metadata.put(kv.getKey(), kv.getValue()));
+                    Map<String, String> metadata = new HashMap<>();
+                    for (int i = 0; i < driverMetadata.getPropertiesCount(); i++) {
+                        KeyValue kv = driverMetadata.getPropertyAt(i);
+                        metadata.put(kv.getKey(), kv.getValue());
+                    }
                     return metadata;
                 }
             }
@@ -91,20 +97,13 @@ public final class OffloadUtils {
         return defaultDriverName;
     }
 
-    public static void setOffloadDriverMetadata(LedgerInfo.Builder infoBuilder,
+    public static void setOffloadDriverMetadata(LedgerInfo infoBuilder,
                                                 String driverName,
                                                 Map<String, String> offloadDriverMetadata) {
-        infoBuilder.getOffloadContextBuilder()
-            .getDriverMetadataBuilder()
-            .setName(driverName);
-        infoBuilder.getOffloadContextBuilder().getDriverMetadataBuilder().clearProperties();
-        offloadDriverMetadata.forEach((k, v) -> infoBuilder
-                .getOffloadContextBuilder()
-                .getDriverMetadataBuilder()
-                .addProperties(KeyValue.newBuilder()
-                        .setKey(k)
-                        .setValue(v)
-                        .build()));
+        OffloadDriverMetadata driverMeta = infoBuilder.setOffloadContext().setDriverMetadata();
+        driverMeta.setName(driverName);
+        driverMeta.clearProperties();
+        offloadDriverMetadata.forEach((k, v) -> driverMeta.addProperty().setKey(k).setValue(v));
     }
 
     public static byte[] buildLedgerMetadataFormat(LedgerMetadata metadata) {
@@ -161,7 +160,7 @@ public final class OffloadUtils {
         });
 
         if (ledgerMetadataFormat.getCustomMetadataCount() > 0) {
-            Map<String, byte[]> customMetadata = new HashMap();
+            Map<String, byte[]> customMetadata = new HashMap<>();
             ledgerMetadataFormat.getCustomMetadataList().forEach(
                     entry -> customMetadata.put(entry.getKey(), entry.getValue().toByteArray()));
             builder.withCustomMetadata(customMetadata);
@@ -193,8 +192,7 @@ public final class OffloadUtils {
                                      String name, org.apache.bookkeeper.common.util.OrderedScheduler executor) {
         log.info("[{}] Cleanup offload for ledgerId {} uuid {} because of the reason {}.",
                 name, ledgerId, uuid.toString(), cleanupReason);
-        Map<String, String> metadataMap = new HashMap();
-        metadataMap.putAll(offloadDriverMetadata);
+        Map<String, String> metadataMap = new HashMap<>(offloadDriverMetadata);
         metadataMap.put("ManagedLedgerName", name);
 
         return Retries.run(Backoff.exponentialJittered(TimeUnit.SECONDS.toMillis(1),

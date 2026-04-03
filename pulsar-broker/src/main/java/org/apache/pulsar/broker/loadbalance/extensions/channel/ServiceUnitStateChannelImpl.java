@@ -51,6 +51,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -93,7 +94,6 @@ import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.NamespaceBundleFactory;
 import org.apache.pulsar.common.naming.NamespaceBundleSplitAlgorithm;
 import org.apache.pulsar.common.naming.NamespaceBundles;
-import org.apache.pulsar.common.naming.TopicVersion;
 import org.apache.pulsar.common.stats.Metrics;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.Reflections;
@@ -445,7 +445,7 @@ public class ServiceUnitStateChannelImpl implements ServiceUnitStateChannel {
             return false;
         }
         var owner = ownerFuture.join();
-        if (owner.isPresent() && StringUtils.equals(targetBrokerId, owner.get())) {
+        if (owner.isPresent() && Objects.equals(targetBrokerId, owner.get())) {
             return true;
         }
         return false;
@@ -671,7 +671,7 @@ public class ServiceUnitStateChannelImpl implements ServiceUnitStateChannel {
     private CompletableFuture<Void> publishOverrideEventAsync(String serviceUnit,
                                                               ServiceUnitStateData override) {
         if (!validateChannelState(Started, true)) {
-            throw new IllegalStateException("Invalid channel state:" + channelState.name());
+            return FutureUtil.failedFuture(new IllegalStateException("Invalid channel state:" + channelState.name()));
         }
         EventType eventType = EventType.Override;
         eventCounters.get(eventType).getTotal().incrementAndGet();
@@ -763,6 +763,11 @@ public class ServiceUnitStateChannelImpl implements ServiceUnitStateChannel {
         if (state.equals(Owned) && isTargetBroker(data.dstBroker())) {
             pulsar.getNamespaceService()
                     .onNamespaceBundleOwned(LoadManagerShared.getNamespaceBundle(pulsar, serviceUnit));
+        } else if (state.equals(Assigning) && isTargetBroker(data.dstBroker())) {
+            // If this broker is the assignment target and the Assigning event was published before this
+            // broker's channel finished starting (e.g., after a restart), handle it now so ownership
+            // is resolved immediately rather than waiting for the ownership monitor (up to 60s).
+            handleAssignEvent(serviceUnit, data);
         }
     }
 
@@ -1037,10 +1042,10 @@ public class ServiceUnitStateChannelImpl implements ServiceUnitStateChannel {
                     // Defer this request til the inflight ownership change is complete.
                     requested.setValue(deferGetOwner(serviceUnit));
                 }
-                return requested.getValue();
+                return requested.get();
             });
         } finally {
-            var future = requested.getValue();
+            var future = requested.get();
             if (future != null) {
                 future.whenComplete((__, e) -> {
                     getOwnerRequests.remove(serviceUnit);
@@ -1413,7 +1418,7 @@ public class ServiceUnitStateChannelImpl implements ServiceUnitStateChannel {
                 return future;
             });
         } finally {
-            var future = scheduled.getValue();
+            var future = scheduled.get();
             if (future != null) {
                 future.whenComplete((v, ex) -> {
                     cleanupJobs.remove(broker);
@@ -1526,7 +1531,7 @@ public class ServiceUnitStateChannelImpl implements ServiceUnitStateChannel {
         }
         try {
             var admin = getPulsarAdmin();
-            admin.brokers().healthcheckAsync(TopicVersion.V2, Optional.of(brokerId))
+            admin.brokers().healthcheckAsync(Optional.of(brokerId))
                     .whenComplete((__, e) -> {
                         if (e == null) {
                             log.info("Completed health-check broker :{}", brokerId, e);
@@ -1615,8 +1620,8 @@ public class ServiceUnitStateChannelImpl implements ServiceUnitStateChannel {
             var stateData = etr.getValue();
             var serviceUnit = etr.getKey();
             var state = state(stateData);
-            if (StringUtils.equals(broker, stateData.dstBroker()) && isActiveState(state)
-                    || StringUtils.equals(broker, stateData.sourceBroker()) && isInFlightState(state)) {
+            if (Objects.equals(broker, stateData.dstBroker()) && isActiveState(state)
+                    || Objects.equals(broker, stateData.sourceBroker()) && isInFlightState(state)) {
                 if (serviceUnit.startsWith(SYSTEM_NAMESPACE.toString())) {
                     orphanSystemServiceUnits.put(serviceUnit, stateData);
                 } else {

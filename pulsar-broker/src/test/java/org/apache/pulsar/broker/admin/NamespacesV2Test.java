@@ -82,7 +82,7 @@ public class NamespacesV2Test extends MockedPulsarServiceBaseTest {
     @BeforeClass
     public void initNamespace() throws Exception {
         testLocalNamespaces = new ArrayList<>();
-        testLocalNamespaces.add(NamespaceName.get(this.testTenant, this.testLocalCluster, this.testNamespace));
+        testLocalNamespaces.add(NamespaceName.get(this.testTenant, this.testNamespace));
 
         uriField = PulsarWebResource.class.getDeclaredField("uri");
         uriField.setAccessible(true);
@@ -113,11 +113,11 @@ public class NamespacesV2Test extends MockedPulsarServiceBaseTest {
         createTestNamespaces(this.testLocalNamespaces);
 
         doThrow(new RestException(Response.Status.UNAUTHORIZED, "unauthorized")).when(namespaces)
-                .validateNamespacePolicyOperation(NamespaceName.get("other-tenant/use/test-namespace-1"),
+                .validateNamespacePolicyOperation(NamespaceName.get("other-tenant/test-namespace-1"),
                         PolicyName.PERSISTENCE, PolicyOperation.WRITE);
 
         doThrow(new RestException(Response.Status.UNAUTHORIZED, "unauthorized")).when(namespaces)
-                .validateNamespacePolicyOperation(NamespaceName.get("other-tenant/use/test-namespace-1"),
+                .validateNamespacePolicyOperation(NamespaceName.get("other-tenant/test-namespace-1"),
                         PolicyName.RETENTION, PolicyOperation.WRITE);
 
         nsSvc = pulsar.getNamespaceService();
@@ -455,6 +455,7 @@ public class NamespacesV2Test extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testGetClusterAntiAffinityNamespaces() throws Exception {
         // create 5 namespaces, 3 namespaces are set to the same namespace anti affinity group,
         // 2 namespaces are not set to any anti affinity group

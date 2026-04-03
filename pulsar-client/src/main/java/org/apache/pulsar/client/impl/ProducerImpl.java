@@ -48,6 +48,7 @@ import io.opentelemetry.api.common.Attributes;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -85,6 +86,7 @@ import org.apache.pulsar.client.impl.metrics.InstrumentProvider;
 import org.apache.pulsar.client.impl.metrics.LatencyHistogram;
 import org.apache.pulsar.client.impl.metrics.Unit;
 import org.apache.pulsar.client.impl.metrics.UpDownCounter;
+import org.apache.pulsar.client.impl.schema.AutoProduceBytesSchema;
 import org.apache.pulsar.client.impl.schema.JSONSchema;
 import org.apache.pulsar.client.impl.schema.SchemaUtils;
 import org.apache.pulsar.client.impl.transaction.TransactionImpl;
@@ -102,7 +104,7 @@ import org.apache.pulsar.common.protocol.schema.SchemaHash;
 import org.apache.pulsar.common.protocol.schema.SchemaVersion;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.schema.SchemaType;
-import org.apache.pulsar.common.util.BackoffBuilder;
+import org.apache.pulsar.common.util.Backoff;
 import org.apache.pulsar.common.util.DateFormatter;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.RelativeTimeUtil;
@@ -145,16 +147,18 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
 
     private final CompressionCodec compressor;
 
+    @SuppressWarnings("rawtypes")
     static final AtomicLongFieldUpdater<ProducerImpl> LAST_SEQ_ID_PUBLISHED_UPDATER = AtomicLongFieldUpdater
             .newUpdater(ProducerImpl.class, "lastSequenceIdPublished");
     private volatile long lastSequenceIdPublished;
 
+    @SuppressWarnings("rawtypes")
     static final AtomicLongFieldUpdater<ProducerImpl> LAST_SEQ_ID_PUSHED_UPDATER = AtomicLongFieldUpdater
             .newUpdater(ProducerImpl.class, "lastSequenceIdPushed");
     protected volatile long lastSequenceIdPushed;
     private volatile boolean isLastSequenceIdPotentialDuplicated;
 
-    private final MessageCrypto msgCrypto;
+    private final MessageCrypto<?, ?> msgCrypto;
 
     private ScheduledFuture<?> keyGeneratorTask = null;
 
@@ -234,7 +238,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
                 this.msgCrypto = conf.getMessageCrypto();
             } else {
                 // default to use MessageCryptoBc;
-                MessageCrypto msgCryptoBc;
+                MessageCrypto<?, ?> msgCryptoBc;
                 try {
                     msgCryptoBc = new MessageCryptoBc(logCtx, true);
                 } catch (Exception e) {
@@ -326,11 +330,11 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
 
     ConnectionHandler initConnectionHandler() {
         return new ConnectionHandler(this,
-            new BackoffBuilder()
-                .setInitialTime(client.getConfiguration().getInitialBackoffIntervalNanos(), TimeUnit.NANOSECONDS)
-                .setMax(client.getConfiguration().getMaxBackoffIntervalNanos(), TimeUnit.NANOSECONDS)
-                .setMandatoryStop(Math.max(100, conf.getSendTimeoutMs() - 100), TimeUnit.MILLISECONDS)
-                .create(),
+            Backoff.builder()
+                .initialDelay(Duration.ofNanos(client.getConfiguration().getInitialBackoffIntervalNanos()))
+                .maxBackoff(Duration.ofNanos(client.getConfiguration().getMaxBackoffIntervalNanos()))
+                .mandatoryStop(Duration.ofMillis(Math.max(100, conf.getSendTimeoutMs() - 100)))
+                .build(),
         this);
     }
 
@@ -452,6 +456,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
             }
         }
 
+        @SuppressWarnings("unchecked")
         private void onSendComplete(Throwable e, SendCallback sendCallback, MessageImpl<?> msg) {
             long createdAt = (sendCallback instanceof ProducerImpl.DefaultSendMessageCallback)
                     ? ((DefaultSendMessageCallback) sendCallback).createdAt : this.createdAt;
@@ -850,7 +855,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
     }
 
     @VisibleForTesting
-    boolean populateMessageSchema(MessageImpl msg, SendCallback callback) {
+    boolean populateMessageSchema(MessageImpl<?> msg, SendCallback callback) {
         MessageMetadata msgMetadataBuilder = msg.getMessageBuilder();
         if (msg.getSchemaInternal() == schema) {
             schemaVersion.ifPresent(v -> msgMetadataBuilder.setSchemaVersion(v));
@@ -885,7 +890,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
         return true;
     }
 
-    private boolean rePopulateMessageSchema(MessageImpl msg) {
+    private boolean rePopulateMessageSchema(MessageImpl<?> msg) {
         byte[] schemaVersion = schemaCache.get(msg.getSchemaHash());
         if (schemaVersion == null) {
             return false;
@@ -899,7 +904,8 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
         return true;
     }
 
-    private void tryRegisterSchema(ClientCnx cnx, final MessageImpl msg, SendCallback callback, long expectedCnxEpoch) {
+    private void tryRegisterSchema(ClientCnx cnx, final MessageImpl<?> msg, SendCallback callback,
+                                    long expectedCnxEpoch) {
         if (!changeToRegisteringSchemaState()) {
             return;
         }
@@ -959,6 +965,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
         return cnx.sendGetOrCreateSchema(request, requestId);
     }
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
     protected ByteBuf encryptMessage(MessageMetadata msgMetadata, ByteBuf compressedPayload)
             throws PulsarClientException {
 
@@ -971,8 +978,8 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
             ByteBuf encryptedPayload = PulsarByteBufAllocator.DEFAULT.buffer(maxSize);
             ByteBuffer targetBuffer = encryptedPayload.nioBuffer(0, maxSize);
 
-            msgCrypto.encrypt(conf.getEncryptionKeys(), conf.getCryptoKeyReader(), () -> msgMetadata,
-                    compressedPayload.nioBuffer(), targetBuffer);
+            ((MessageCrypto) msgCrypto).encrypt(conf.getEncryptionKeys(), conf.getCryptoKeyReader(),
+                    () -> msgMetadata, compressedPayload.nioBuffer(), targetBuffer);
 
             encryptedPayload.writerIndex(targetBuffer.remaining());
             compressedPayload.release();
@@ -1047,6 +1054,23 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
             lastSendFuture = callback.getFuture();
         } finally {
             payload.release();
+        }
+    }
+
+    private PulsarClientException getTerminalException(State state) {
+        switch (state) {
+            case Terminated:
+                return new PulsarClientException.TopicTerminatedException(
+                        format("The topic %s that the producer %s produces to has been terminated", topic,
+                                producerName));
+            case Closed:
+                return new PulsarClientException.AlreadyClosedException(
+                        format("The producer %s of the topic %s was already closed", producerName, topic));
+            case ProducerFenced:
+                return new PulsarClientException.ProducerFencedException(
+                        format("The producer %s of the topic %s was fenced", producerName, topic));
+            default:
+                return new PulsarClientException.NotConnectedException();
         }
     }
 
@@ -1917,7 +1941,10 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
                     if (Commands.peerSupportJsonSchemaAvroFormat(cnx.getRemoteEndpointProtocolVersion())) {
                         schemaInfo = schema.getSchemaInfo();
                     } else if (schema instanceof JSONSchema) {
-                        JSONSchema jsonSchema = (JSONSchema) schema;
+                        // Deprecated (PIP-464): This backward-compatible path sends old Jackson JsonSchema
+                        // format to brokers below protocol v13 (Pulsar < 2.1). Scheduled for removal in a
+                        // future major release.
+                        JSONSchema<?> jsonSchema = (JSONSchema<?>) schema;
                         schemaInfo = jsonSchema.getBackwardsCompatibleJsonSchemaInfo();
                     } else {
                         schemaInfo = schema.getSchemaInfo();
@@ -1992,6 +2019,16 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
                 // drops the producer on its side
                 cnx.channel().close();
                 future.complete(null);
+                return null;
+            }
+
+            if (cause instanceof PulsarClientException.IncompatibleSchemaException
+                    && schema instanceof AutoProduceBytesSchema autoProduceBytesSchema
+                    && !autoProduceBytesSchema.hasUserProvidedSchema()) {
+                client.reloadSchemaForAutoProduceProducer(topic, autoProduceBytesSchema)
+                    .whenComplete((__, throwable) -> {
+                        future.completeExceptionally(cause);
+                    });
                 return null;
             }
 
@@ -2471,9 +2508,20 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
                 op.cmd.release();
                 return;
             }
+            final State state = getState();
+            if (state == State.Terminated || state == State.Closed || state == State.ProducerFenced) {
+                // The producer is in a terminal state and will never reconnect. Fail the message immediately
+                // rather than leaving it stuck in pendingMessages until sendTimeout.
+                releaseSemaphoreForSendOp(op);
+                client.getMemoryLimitController().releaseMemory(op.uncompressedSize);
+                op.sendComplete(getTerminalException(state));
+                ReferenceCountUtil.safeRelease(op.cmd);
+                op.recycle();
+                return;
+            }
             pendingMessages.add(op);
             updateLastSeqPushed(op);
-            if (State.RegisteringSchema.equals(getState())) {
+            if (State.RegisteringSchema.equals(state)) {
                 // Since there is a in-progress schema registration, do not continuously publish to avoid break publish
                 // ordering. After the schema registration finished, it will trigger a "recoverProcessOpSendMsgFrom" to
                 // publish all messages in "pendingMessages".
@@ -2528,7 +2576,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
      * Note: Since the current method accesses & modifies {@link #pendingMessages}, you should acquire a lock on
      *       {@link ProducerImpl} before calling method.
      */
-    private void recoverProcessOpSendMsgFrom(ClientCnx cnx, MessageImpl latestMsgAttemptedRegisteredSchema,
+    private void recoverProcessOpSendMsgFrom(ClientCnx cnx, MessageImpl<?> latestMsgAttemptedRegisteredSchema,
                                              boolean failedIncompatibleSchema, long expectedEpoch) {
         if (expectedEpoch != this.connectionHandler.getEpoch() || cnx() == null) {
             // In this case, the cnx passed to this method is no longer the active connection. This method will get
@@ -2540,7 +2588,7 @@ public class ProducerImpl<T> extends ProducerBase<T> implements TimerTask, Conne
         }
         final boolean stripChecksum = cnx.getRemoteEndpointProtocolVersion() < brokerChecksumSupportedVersion();
         Iterator<OpSendMsg> msgIterator = pendingMessages.iterator();
-        MessageImpl loopStartAt = latestMsgAttemptedRegisteredSchema;
+        MessageImpl<?> loopStartAt = latestMsgAttemptedRegisteredSchema;
         OpSendMsg loopEndDueToSchemaRegisterNeeded = null;
         boolean pausedSendingToPreservePublishOrderOnSchemaRegFailure = false;
         while (msgIterator.hasNext()) {

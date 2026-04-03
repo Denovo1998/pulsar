@@ -102,8 +102,8 @@ import org.apache.pulsar.common.util.DateFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+@SuppressWarnings("deprecation")
 public class TopicsImpl extends BaseResource implements Topics {
-    private final WebTarget adminTopics;
     private final WebTarget adminV2Topics;
     // CHECKSTYLE.OFF: MemberName
     private static final String BATCH_HEADER = "X-Pulsar-num-batch-message";
@@ -144,7 +144,6 @@ public class TopicsImpl extends BaseResource implements Topics {
 
     public TopicsImpl(WebTarget web, Authentication auth, long requestTimeoutMs) {
         super(auth, requestTimeoutMs);
-        adminTopics = web.path("/admin");
         adminV2Topics = web.path("/admin/v2");
     }
 
@@ -341,6 +340,7 @@ public class TopicsImpl extends BaseResource implements Topics {
         return createPartitionedTopicAsync(topic, numPartitions, false, properties);
     }
 
+    @SuppressWarnings("unchecked")
     public CompletableFuture<Void> createPartitionedTopicAsync(
             String topic, int numPartitions, boolean createLocalTopicOnly, Map<String, String> properties) {
         checkArgument(numPartitions > 0, "Number of partitions should be more than 0");
@@ -1255,15 +1255,13 @@ public class TopicsImpl extends BaseResource implements Topics {
     }
 
     private WebTarget namespacePath(String domain, NamespaceName namespace, String... parts) {
-        final WebTarget base = namespace.isV2() ? adminV2Topics : adminTopics;
-        WebTarget namespacePath = base.path(domain).path(namespace.toString());
+        WebTarget namespacePath = adminV2Topics.path(domain).path(namespace.toString());
         namespacePath = WebTargets.addParts(namespacePath, parts);
         return namespacePath;
     }
 
     private WebTarget topicPath(TopicName topic, String... parts) {
-        final WebTarget base = topic.isV2() ? adminV2Topics : adminTopics;
-        WebTarget topicPath = base.path(topic.getRestPath());
+        WebTarget topicPath = adminV2Topics.path(topic.getRestPath());
         topicPath = WebTargets.addParts(topicPath, parts);
         return topicPath;
     }
@@ -1281,6 +1279,7 @@ public class TopicsImpl extends BaseResource implements Topics {
                 TransactionIsolationLevel.READ_UNCOMMITTED);
     }
 
+    @SuppressWarnings("unchecked")
     private List<Message<byte[]>> getMessagesFromHttpResponse(
             String topic, Response response, boolean showServerMarker,
             TransactionIsolationLevel transactionIsolationLevel) throws Exception {
@@ -1492,6 +1491,7 @@ public class TopicsImpl extends BaseResource implements Topics {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private List<Message<byte[]>> getIndividualMsgsFromBatch(String topic, String msgId, byte[] data,
                                  Map<String, String> properties, MessageMetadata msgMetadataBuilder,
                                                              BrokerEntryMetadata brokerEntryMetadata) {
@@ -1587,6 +1587,7 @@ public class TopicsImpl extends BaseResource implements Topics {
         return sync(() -> analyzeSubscriptionBacklogAsync(topic, subscriptionName, startPosition, terminatePredicate));
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public CompletableFuture<AnalyzeSubscriptionBacklogResult> analyzeSubscriptionBacklogAsync(String topic,
                                                                                 String subscriptionName,

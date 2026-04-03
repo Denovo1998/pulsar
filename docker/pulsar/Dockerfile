@@ -78,6 +78,12 @@ ENV JAVA_HOME=/usr/lib/jvm/default-jvm
 RUN curl -Ls https://github.com/xerial/snappy-java/archive/refs/tags/v$SNAPPY_VERSION.tar.gz | tar zxf - && cd snappy-java-$SNAPPY_VERSION && CMAKE_POLICY_VERSION_MINIMUM=3.5 make clean-native native
 
 
+## Extract offloader NARs
+FROM busybox AS offloaders
+ARG PULSAR_OFFLOADER_TARBALL
+ADD ${PULSAR_OFFLOADER_TARBALL} /
+RUN mv /apache-pulsar-offloaders-*/offloaders /offloaders
+
 ## Create final stage from Alpine image
 ## and add OpenJDK and Python dependencies (for Pulsar functions)
 FROM alpine:$ALPINE_VERSION
@@ -111,8 +117,8 @@ RUN apk upgrade --no-cache
 ARG PULSAR_CLIENT_PYTHON_VERSION
 RUN pip3 install --break-system-packages --no-cache-dir \
     --only-binary \
-    grpcio==1.73.1 \
-    protobuf==6.31.1 \
+    grpcio==1.78.0 \
+    protobuf==6.33.5 \
     pulsar-client[all]==${PULSAR_CLIENT_PYTHON_VERSION} \
     kazoo
 
@@ -125,6 +131,9 @@ COPY --from=snappy-java /tmp/libsnappyjava.so /usr/lib/libsnappyjava.so
 ENV PULSAR_PID_DIR=/pulsar/logs
 
 COPY --from=pulsar /pulsar /pulsar
+
+# Add tiered-storage offloader NARs
+COPY --from=offloaders /offloaders /pulsar/offloaders
 
 WORKDIR /pulsar
 ENV PATH=$PATH:$JAVA_HOME/bin:/pulsar/bin

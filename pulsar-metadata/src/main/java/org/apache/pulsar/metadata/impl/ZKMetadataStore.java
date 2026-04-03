@@ -124,13 +124,11 @@ public class ZKMetadataStore extends AbstractBatchedMetadataStore
     }
 
     @VisibleForTesting
-    @SneakyThrows
     public ZKMetadataStore(ZooKeeper zkc) {
         this(zkc, MetadataStoreConfig.builder().build());
     }
 
     @VisibleForTesting
-    @SneakyThrows
     public ZKMetadataStore(ZooKeeper zkc, MetadataStoreConfig config) {
         this(zkc, config, false);
     }
@@ -685,6 +683,11 @@ class ZkMetadataStoreProvider implements MetadataStoreProvider {
         if (metadataURL.startsWith(ZKMetadataStore.ZK_SCHEME_IDENTIFIER)) {
             metadataURL = metadataURL.substring(ZKMetadataStore.ZK_SCHEME_IDENTIFIER.length());
         }
-        return new ZKMetadataStore(metadataURL, metadataStoreConfig, enableSessionWatcher);
+
+        // Create the ZK metadata store
+        ZKMetadataStore zkStore = new ZKMetadataStore(metadataURL, metadataStoreConfig, enableSessionWatcher);
+
+        // Wrap with DualMetadataStore to enable migration capability
+        return new DualMetadataStore(zkStore, metadataStoreConfig);
     }
 }

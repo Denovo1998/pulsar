@@ -67,6 +67,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         super.internalCleanup();
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testBacklogQuotaDisabled() {
         BacklogQuota backlogQuota = BacklogQuota.builder()
@@ -97,6 +98,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testRetentionDisabled() {
         RetentionPolicies retention = new RetentionPolicies();
@@ -117,6 +119,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testPersistenceDisabled() {
         PersistencePolicies persistencePolicies = new PersistencePolicies();
@@ -137,6 +140,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testDispatchRateDisabled() throws Exception {
         DispatchRate dispatchRate = DispatchRate.builder().build();
@@ -157,6 +161,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testSubscriptionDispatchRateDisabled() throws Exception {
         DispatchRate dispatchRate = DispatchRate.builder()
@@ -181,6 +186,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testCompactionThresholdDisabled() {
         Long compactionThreshold = 10000L;
@@ -201,6 +207,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testMaxConsumersPerSubscription() throws Exception {
         int maxConsumersPerSubscription = 10;
@@ -228,6 +235,35 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
+    @Test
+    public void testSubscriptionExpirationTimeDisabled() throws Exception {
+        int subscriptionExpirationTime = 10;
+        log.info("SubscriptionExpirationTime: {} will set to the topic: {}", subscriptionExpirationTime, testTopic);
+
+        try {
+            admin.topicPolicies().setSubscriptionExpirationTime(testTopic, subscriptionExpirationTime);
+            Assert.fail();
+        } catch (PulsarAdminException e) {
+            Assert.assertEquals(e.getStatusCode(), HttpStatus.METHOD_NOT_ALLOWED_405);
+        }
+
+        try {
+            admin.topicPolicies().getSubscriptionExpirationTime(testTopic);
+            Assert.fail();
+        } catch (PulsarAdminException e) {
+            Assert.assertEquals(e.getStatusCode(), HttpStatus.METHOD_NOT_ALLOWED_405);
+        }
+
+        try {
+            admin.topicPolicies().removeSubscriptionExpirationTime(testTopic);
+            Assert.fail();
+        } catch (PulsarAdminException e) {
+            Assert.assertEquals(e.getStatusCode(), HttpStatus.METHOD_NOT_ALLOWED_405);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
     @Test
     public void testPublishRateDisabled() throws Exception {
         PublishRate publishRate = new PublishRate(10000, 1024 * 1024 * 5);
@@ -248,6 +284,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testMaxProducersDisabled() {
         log.info("MaxProducers will set to the topic: {}", testTopic);
@@ -266,6 +303,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testMaxConsumersDisabled() {
         log.info("MaxConsumers will set to the topic: {}", testTopic);
@@ -284,6 +322,7 @@ public class TopicPoliciesDisableTest extends MockedPulsarServiceBaseTest {
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testSubscribeRateDisabled() throws Exception {
         SubscribeRate subscribeRate = new SubscribeRate(10, 30);

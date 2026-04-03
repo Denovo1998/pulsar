@@ -238,8 +238,7 @@ public class PerformanceClient extends CmdBase {
         HashMap<String, Tuple> producersMap = new HashMap<>();
         String topicName = this.topics.get(0);
         String restPath = TopicName.get(topicName).getRestPath();
-        String produceBaseEndPoint = TopicName.get(topicName).isV2()
-                ? this.proxyURL + "ws/v2/producer/" + restPath : this.proxyURL + "ws/producer/" + restPath;
+        String produceBaseEndPoint = this.proxyURL + "ws/v2/producer/" + restPath;
         HttpClient httpClient = new HttpClient();
         httpClient.setSslContextFactory(new SslContextFactory.Client(true));
         for (int i = 0; i < this.numTopics; i++) {
@@ -403,6 +402,7 @@ public class PerformanceClient extends CmdBase {
 
     }
 
+    @SuppressWarnings("unchecked")
     static IMessageFormatter getMessageFormatter(String formatterClass) {
         try {
             ClassLoader classLoader = PerformanceClient.class.getClassLoader();

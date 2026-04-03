@@ -407,7 +407,7 @@ public class ProxyPublishConsumeTest extends ProducerConsumerBase {
     public void producerBacklogQuotaExceededTest() throws Exception {
         String namespace = "my-property/ns-ws-quota";
         admin.namespaces().createNamespace(namespace);
-        admin.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("test"));
+        admin.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("test"), false);
         admin.namespaces().setBacklogQuota(namespace,
                 BacklogQuota.builder()
                         .limitSize(10)
@@ -479,7 +479,7 @@ public class ProxyPublishConsumeTest extends ProducerConsumerBase {
     public void topicDoesNotExistTest() throws Exception {
         final String namespace = "my-property/ns-topic-creation-not-allowed";
         admin.namespaces().createNamespace(namespace);
-        admin.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("test"));
+        admin.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("test"), false);
         admin.namespaces().setAutoTopicCreation(namespace,
                 AutoTopicCreationOverride.builder()
                         .allowAutoTopicCreation(false)
@@ -1030,7 +1030,7 @@ public class ProxyPublishConsumeTest extends ProducerConsumerBase {
         String statUrl = baseUrl + topic + "/stats";
         WebTarget webTarget = client.target(statUrl);
         Invocation.Builder invocationBuilder = webTarget.request(MediaType.APPLICATION_JSON);
-        Response response = (Response) invocationBuilder.get();
+        Response response = invocationBuilder.get();
         String responseStr = response.readEntity(String.class);
         final Gson gson = new Gson();
         final ProxyTopicStat data = gson.fromJson(responseStr, ProxyTopicStat.class);
