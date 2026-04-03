@@ -65,6 +65,7 @@ public class InMemoryDelayedDeliveryTrackerFactory implements DelayedDeliveryTra
         return tracker;
     }
 
+    @VisibleForTesting
     InMemoryDelayedDeliveryTracker newTracker0(AbstractPersistentDispatcherMultipleConsumers dispatcher) {
         return new InMemoryDelayedDeliveryTracker(dispatcher, timer, tickTimeMillis,
                 isDelayedDeliveryDeliverAtTimeStrict, fixedDelayDetectionLookahead);
