@@ -300,8 +300,6 @@ public abstract class PulsarContainer<SelfT extends PulsarContainer<SelfT>> exte
     }
 
     protected void initializePulsarExtraOpts() {
-        appendToEnv("PULSAR_EXTRA_OPTS",
-                "-Dpulsar.allocator.exit_on_oom=true -Dio.netty.recycler.maxCapacityPerThread=4096");
     }
 
     protected boolean isCodeCoverageEnabled() {
@@ -394,7 +392,7 @@ public abstract class PulsarContainer<SelfT extends PulsarContainer<SelfT>> exte
         sb.append("-agentpath:/opt/async-profiler/lib/libasyncProfiler.so=start,");
         sb.append(System.getProperty("inttest.asyncprofiler.opts", "event=cpu,lock=1ms,alloc=2m,jfrsync=profile"));
         sb.append(",file=/profiles/inttest_profile_").append(System.getProperty("git.commit.id.abbrev", ""));
-        sb.append("_").append(System.getProperty("maven.build.timestamp", "").replace(' ', '_'));
+        sb.append("_").append(System.getProperty("build.timestamp", "").replace(' ', '_'));
         sb.append("_").append(getContainerName());
         sb.append("_").append("%p.").append(System.getProperty("inttest.asyncprofiler.outputformat", "jfr"));
         initializePulsarExtraOpts();

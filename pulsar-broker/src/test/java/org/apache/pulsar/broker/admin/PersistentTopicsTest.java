@@ -139,6 +139,12 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     }
 
     @Override
+    protected void doInitConf() throws Exception {
+        configureInitialConfig(conf);
+        conf.setCreateTopicToRemoteClusterForReplication(false);
+    }
+
+    @Override
     @BeforeMethod
     protected void setup() throws Exception {
         conf.setTopicLevelPoliciesEnabled(false);
@@ -638,6 +644,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
                 Response.Status.PRECONDITION_FAILED.getStatusCode());
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testCreatePartitionedTopicHavingNonPartitionTopicWithPartitionSuffix()
             throws KeeperException, InterruptedException {
@@ -718,7 +725,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
                 .open(TopicName.get(nonPartitionTopicName2).getPersistenceNamingEncoding());
         doAnswer(invocation -> {
             persistentTopics.namespaceName = NamespaceName.get("tenant", "namespace");
-            persistentTopics.topicName = TopicName.get("persistent", "tenant", "cluster", "namespace", "topicname");
+            persistentTopics.topicName = TopicName.get("persistent", "tenant", "namespace", "topicname");
             return null;
         }).when(persistentTopics).validatePartitionedTopicName(any(), any(), any());
 
@@ -792,6 +799,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testGetPartitionedTopicsList() throws KeeperException, InterruptedException, PulsarAdminException {
         AsyncResponse response = mock(AsyncResponse.class);
         ArgumentCaptor<Response> responseCaptor = ArgumentCaptor.forClass(Response.class);
@@ -838,6 +846,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testGetList() throws Exception {
         AsyncResponse response = mock(AsyncResponse.class);
         ArgumentCaptor<Response> responseCaptor = ArgumentCaptor.forClass(Response.class);
@@ -893,6 +902,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testGrantNonPartitionedTopic() {
         final String topicName = "non-partitioned-topic";
         AsyncResponse response = mock(AsyncResponse.class);
@@ -935,6 +945,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testGrantPartitionedTopic() {
         final String partitionedTopicName = "partitioned-topic";
         final int numPartitions = 5;
@@ -963,6 +974,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testRevokeNonPartitionedTopic() {
         final String topicName = "non-partitioned-topic";
         AsyncResponse response = mock(AsyncResponse.class);
@@ -992,6 +1004,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testRevokePartitionedTopic() {
         final String partitionedTopicName = "partitioned-topic";
         final int numPartitions = 5;
@@ -1394,6 +1407,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
         Assert.assertEquals(responseCaptor.getValue().getStatus(), Response.Status.NO_CONTENT.getStatusCode());
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testGetMessageById() throws Exception {
         TenantInfoImpl tenantInfo = new TenantInfoImpl(Set.of("role1", "role2"), Set.of("test"));
@@ -1432,6 +1446,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
         });
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testGetMessageById4SpecialPropsInMsg() throws Exception {
         TenantInfoImpl tenantInfo = new TenantInfoImpl(Set.of("role1", "role2"), Set.of("test"));
@@ -1870,7 +1885,7 @@ public class PersistentTopicsTest extends MockedPulsarServiceBaseTest {
 
     @Test
     public void testNamespaceResources() throws Exception {
-        String ns1V1 = "test/" + testNamespace + "v1";
+        String ns1V1 = testNamespace + "v1";
         String ns1V2 = testNamespace + "v2";
         admin.namespaces().createNamespace(testTenant + "/" + ns1V1);
         admin.namespaces().createNamespace(testTenant + "/" + ns1V2);

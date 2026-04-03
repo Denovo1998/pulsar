@@ -18,7 +18,6 @@
  */
 package org.apache.pulsar.client.impl;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static org.apache.pulsar.common.protocol.Commands.DEFAULT_CONSUMER_EPOCH;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Queues;
@@ -98,16 +97,19 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
     protected final int maxReceiverQueueSize;
     private volatile int currentReceiverQueueSize;
 
+    @SuppressWarnings("rawtypes")
     protected static final AtomicIntegerFieldUpdater<ConsumerBase> MESSAGE_LISTENER_QUEUE_SIZE_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(ConsumerBase.class, "messageListenerQueueSize");
     protected volatile int messageListenerQueueSize = 0;
 
+    @SuppressWarnings("rawtypes")
     protected static final AtomicIntegerFieldUpdater<ConsumerBase> CURRENT_RECEIVER_QUEUE_SIZE_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(ConsumerBase.class, "currentReceiverQueueSize");
     protected final Schema<T> schema;
     protected final ConsumerInterceptors<T> interceptors;
     protected final BatchReceivePolicy batchReceivePolicy;
     protected final ConcurrentLinkedQueue<OpBatchReceive<T>> pendingBatchReceives;
+    @SuppressWarnings("rawtypes")
     private static final AtomicLongFieldUpdater<ConsumerBase> INCOMING_MESSAGES_SIZE_UPDATER = AtomicLongFieldUpdater
             .newUpdater(ConsumerBase.class, "incomingMessagesSize");
     protected volatile long incomingMessagesSize = 0;
@@ -116,6 +118,7 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
     // Only work when subscription type is Failover or Exclusive
     protected final Lock incomingQueueLock;
 
+    @SuppressWarnings("rawtypes")
     protected static final AtomicLongFieldUpdater<ConsumerBase> CONSUMER_EPOCH =
             AtomicLongFieldUpdater.newUpdater(ConsumerBase.class, "consumerEpoch");
 
@@ -132,13 +135,14 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
     protected ConsumerBase(PulsarClientImpl client, String topic, ConsumerConfigurationData<T> conf,
                            int receiverQueueSize, ExecutorProvider executorProvider,
                            CompletableFuture<Consumer<T>> subscribeFuture, Schema<T> schema,
-                           ConsumerInterceptors interceptors) {
+                           ConsumerInterceptors<T> interceptors) {
         super(client, topic);
         this.maxReceiverQueueSize = receiverQueueSize;
         this.subscription = conf.getSubscriptionName();
         this.conf = conf;
         this.consumerName =
-                conf.getConsumerName() == null ? RandomStringUtils.randomAlphanumeric(5) : conf.getConsumerName();
+                conf.getConsumerName() == null ? RandomStringUtils.insecure().nextAlphanumeric(5)
+                        : conf.getConsumerName();
         this.subscribeFuture = subscribeFuture;
         this.listener = conf.getMessageListener();
         this.decryptFailListener = conf.getDecryptFailListener();
@@ -662,7 +666,10 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
         }
         TransactionImpl txnImpl = null;
         if (null != txn) {
-            checkArgument(txn instanceof TransactionImpl);
+            if (!(txn instanceof TransactionImpl)) {
+                return FutureUtil.failedFuture(new IllegalArgumentException(
+                        "Expected txn to be an instance of TransactionImpl, but got " + txn.getClass().getName()));
+            }
             txnImpl = (TransactionImpl) txn;
             CompletableFuture<Void> completableFuture = new CompletableFuture<>();
            if (!txnImpl.checkIfOpen(completableFuture)) {
@@ -691,7 +698,10 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
 
         TransactionImpl txnImpl = null;
         if (null != txn) {
-            checkArgument(txn instanceof TransactionImpl);
+            if (!(txn instanceof TransactionImpl)) {
+                return FutureUtil.failedFuture(new IllegalArgumentException(
+                        "Expected txn to be an instance of TransactionImpl, but got " + txn.getClass().getName()));
+            }
             txnImpl = (TransactionImpl) txn;
         }
         return doAcknowledgeWithTxn(messageId, AckType.Cumulative, Collections.emptyMap(), txnImpl);
@@ -1225,8 +1235,8 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
                 log.debug("[{}][{}] Calling message listener for message {}", topic, subscription,
                         msg.getMessageId());
             }
-            ConsumerImpl receivedConsumer = (msg instanceof TopicMessageImpl)
-                    ? ((TopicMessageImpl<T>) msg).receivedByconsumer : (ConsumerImpl) this;
+            ConsumerImpl<T> receivedConsumer = (msg instanceof TopicMessageImpl)
+                    ? ((TopicMessageImpl<T>) msg).receivedByconsumer : (ConsumerImpl<T>) this;
 
             // check the internal consumer state
             if (receivedConsumer != this) {
@@ -1354,8 +1364,8 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
     protected abstract void completeOpBatchReceive(OpBatchReceive<T> op);
 
     private ExecutorService getExternalExecutor(Message<?> msg) {
-        ConsumerImpl receivedConsumer = (msg instanceof TopicMessageImpl) ? ((TopicMessageImpl) msg).receivedByconsumer
-                : null;
+        ConsumerImpl<?> receivedConsumer = (msg instanceof TopicMessageImpl<?>)
+                ? ((TopicMessageImpl<?>) msg).receivedByconsumer : null;
         ExecutorService executor = receivedConsumer != null && receivedConsumer.externalPinnedExecutor != null
                 ? receivedConsumer.externalPinnedExecutor
                 : externalPinnedExecutor;
@@ -1363,8 +1373,8 @@ public abstract class ConsumerBase<T> extends HandlerState implements Consumer<T
     }
 
     private ExecutorService getInternalExecutor(Message<T> msg) {
-        ConsumerImpl receivedConsumer = (msg instanceof TopicMessageImpl) ? ((TopicMessageImpl) msg).receivedByconsumer
-                : null;
+        ConsumerImpl<?> receivedConsumer = (msg instanceof TopicMessageImpl<?>)
+                ? ((TopicMessageImpl<?>) msg).receivedByconsumer : null;
         ExecutorService executor = receivedConsumer != null && receivedConsumer.internalPinnedExecutor != null
                 ? receivedConsumer.internalPinnedExecutor
                 : internalPinnedExecutor;

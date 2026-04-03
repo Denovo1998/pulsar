@@ -167,9 +167,9 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
     private ManagedLedger ledgerMock;
     private ManagedCursor cursorMock;
 
-    final String successTopicName = "persistent://prop/use/ns-abc/successTopic";
-    final String successPartitionTopicName = "persistent://prop/use/ns-abc/successTopic-partition-0";
-    final String failTopicName = "persistent://prop/use/ns-abc/failTopic";
+    final String successTopicName = "persistent://prop/ns-abc/successTopic";
+    final String successPartitionTopicName = "persistent://prop/ns-abc/successTopic-partition-0";
+    final String failTopicName = "persistent://prop/ns-abc/failTopic";
     final String successSubName = "successSub";
     final String successSubName2 = "successSub2";
     private static final Logger log = LoggerFactory.getLogger(PersistentTopicTest.class);
@@ -247,6 +247,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
 
         setupMLAsyncCallbackMocks();
     }
+    @SuppressWarnings("deprecation")
 
     @AfterMethod(alwaysRun = true)
     public void teardown() throws Exception {
@@ -261,12 +262,13 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testCreateTopic() {
         final ManagedLedger ledgerMock = mock(ManagedLedger.class);
         doReturn(new ManagedLedgerConfig()).when(ledgerMock).getConfig();
         doReturn(new ArrayList<>()).when(ledgerMock).getCursors();
 
-        final String topicName = "persistent://prop/use/ns-abc/topic1";
+        final String topicName = "persistent://prop/ns-abc/topic1";
         doAnswer(invocationOnMock -> {
             ((OpenLedgerCallback) invocationOnMock.getArguments()[2]).openLedgerComplete(ledgerMock, null);
             return null;
@@ -289,8 +291,9 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testCreateTopicMLFailure() {
-        final String jinxedTopicName = "persistent://prop/use/ns-abc/topic3";
+        final String jinxedTopicName = "persistent://prop/ns-abc/topic3";
         doAnswer(invocationOnMock -> {
             new Thread(() -> ((OpenLedgerCallback) invocationOnMock.getArguments()[2])
                     .openLedgerFailed(new ManagedLedgerException("Managed ledger failure"), null)).start();
@@ -388,7 +391,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
 
     @Test
     public void testPublishMessageMLFailure() throws Exception {
-        final String successTopicName = "persistent://prop/use/ns-abc/successTopic";
+        final String successTopicName = "persistent://prop/ns-abc/successTopic";
 
         final ManagedLedger ledgerMock = mock(ManagedLedger.class);
         doReturn(new ManagedLedgerConfig()).when(ledgerMock).getConfig();
@@ -788,6 +791,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
         assertTrue(sub.getDispatcher().isClosed());
     }
 
+    @SuppressWarnings("unchecked")
     private void testMaxConsumersShared() throws Exception {
         PersistentTopic topic = new PersistentTopic(successTopicName, ledgerMock, brokerService);
         topic.initialize().join();
@@ -879,6 +883,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
         testMaxConsumersShared();
     }
 
+    @SuppressWarnings("unchecked")
     private void testMaxConsumersFailover() throws Exception {
 
         PersistentTopic topic = new PersistentTopic(successTopicName, ledgerMock, brokerService);
@@ -989,6 +994,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testMaxSameAddressConsumers() throws Exception {
         // set max clients
         pulsarTestContext.getConfig().setMaxSameAddressConsumersPerTopic(2);
@@ -1689,8 +1695,9 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
      * @throws Exception
      */
     @Test
+    @SuppressWarnings("unchecked")
     public void testAtomicReplicationRemoval() throws Exception {
-        final String globalTopicName = "persistent://prop/global/ns-abc/successTopic";
+        final String globalTopicName = "persistent://prop/ns-abc/successTopic";
         String localCluster = "local";
         String remoteCluster = "remote";
         final ManagedLedger ledgerMock = mock(ManagedLedger.class);
@@ -1710,7 +1717,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
         when(pulsarClientMock.getCnxPool()).thenReturn(connectionPool);
         when(pulsarClientMock.newProducer(any())).thenAnswer(
                 invocation -> {
-                    ProducerBuilderImpl producerBuilder =
+                    @SuppressWarnings("rawtypes")                    ProducerBuilderImpl producerBuilder =
                             new ProducerBuilderImpl(pulsarClientMock, invocation.getArgument(0)) {
                                 @Override
                                 public CompletableFuture<org.apache.pulsar.client.api.Producer> createAsync() {
@@ -1757,7 +1764,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
     @SuppressWarnings("unchecked")
     @Test
     public void testClosingReplicationProducerTwice() throws Exception {
-        final String globalTopicName = "persistent://prop/global/ns/testClosingReplicationProducerTwice";
+        final String globalTopicName = "persistent://prop/ns/testClosingReplicationProducerTwice";
         String localCluster = "local";
         String remoteCluster = "remote";
         final ManagedLedger ledgerMock = mock(ManagedLedger.class);
@@ -1943,6 +1950,9 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
         pulsarTestContext.getConfig().setManagedLedgerCursorBackloggedThreshold(backloggedThreshold);
 
         ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("cache_backlog_ledger");
+        // Disable cache eviction by expected read count so that checkBackloggedCursors
+        // actually deactivates cursors based on backlog threshold.
+        ledger.getConfig().setCacheEvictionByExpectedReadCount(false);
         PersistentTopic topic = new PersistentTopic(successTopicName, ledger, brokerService);
 
         // STEP1: prepare cursors
@@ -2372,7 +2382,7 @@ public class PersistentTopicTest extends MockedBookKeeperTestCase {
         Position lastPosition = PositionFactory.create(1, 0);
         when(ledgerMock.getLastConfirmedEntry()).thenReturn(lastPosition);
         when(ledgerMock.getLedgersInfo()).thenReturn(new java.util.TreeMap<>(Map.of(1L,
-                mock(org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo.LedgerInfo.class))));
+                mock(org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo.LedgerInfo.class))));
 
         // Mock the last entry to return a timestamp
         Entry entryMock = mock(Entry.class);

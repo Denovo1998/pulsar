@@ -37,6 +37,7 @@ import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -49,6 +50,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -82,6 +84,7 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
     private final CopyOnWriteArrayList<Consumer<SessionEvent>> sessionListeners = new CopyOnWriteArrayList<>();
     protected final String metadataStoreName;
     private final OrderedExecutor serDesExecutor;
+    @Getter
     private final ExecutorService eventExecutor;
     private final ScheduledExecutorService schedulerExecutor;
     private final AsyncLoadingCache<String, List<String>> childrenCache;
@@ -298,32 +301,35 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
         return false;
     }
 
+    @SuppressWarnings("unchecked")
     @Override
-    public <T> MetadataCache<T> getMetadataCache(Class<T> clazz, MetadataCacheConfig cacheConfig) {
+    public <T> MetadataCache<T> getMetadataCache(Class<T> clazz, MetadataCacheConfig<?> cacheConfig) {
         JavaType typeRef = TypeFactory.defaultInstance().constructSimpleType(clazz, null);
         String cacheName = StringUtils.isNotBlank(metadataStoreName) ? metadataStoreName : getClass().getSimpleName();
         MetadataCacheImpl<T> metadataCache =
-                new MetadataCacheImpl<T>(cacheName, this, typeRef, cacheConfig, this.serDesExecutor,
-                        this.schedulerExecutor);
+                new MetadataCacheImpl<T>(cacheName, this, typeRef, (MetadataCacheConfig<T>) cacheConfig,
+                        this.serDesExecutor, this.schedulerExecutor);
         metadataCaches.add(metadataCache);
         return metadataCache;
     }
 
+    @SuppressWarnings("unchecked")
     @Override
-    public <T> MetadataCache<T> getMetadataCache(TypeReference<T> typeRef, MetadataCacheConfig cacheConfig) {
+    public <T> MetadataCache<T> getMetadataCache(TypeReference<T> typeRef, MetadataCacheConfig<?> cacheConfig) {
         String cacheName = StringUtils.isNotBlank(metadataStoreName) ? metadataStoreName : getClass().getSimpleName();
         MetadataCacheImpl<T> metadataCache =
-                new MetadataCacheImpl<T>(cacheName, this, typeRef, cacheConfig, this.serDesExecutor,
-                        this.schedulerExecutor);
+                new MetadataCacheImpl<T>(cacheName, this, typeRef, (MetadataCacheConfig<T>) cacheConfig,
+                        this.serDesExecutor, this.schedulerExecutor);
         metadataCaches.add(metadataCache);
         return metadataCache;
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public <T> MetadataCache<T> getMetadataCache(String cacheName, MetadataSerde<T> serde,
-                                                 MetadataCacheConfig cacheConfig) {
+                                                 MetadataCacheConfig<?> cacheConfig) {
         MetadataCacheImpl<T> metadataCache =
-                new MetadataCacheImpl<>(cacheName, this, serde, cacheConfig,
+                new MetadataCacheImpl<>(cacheName, this, serde, (MetadataCacheConfig<T>) cacheConfig,
                         this.serDesExecutor, this.schedulerExecutor);
         metadataCaches.add(metadataCache);
         return metadataCache;
@@ -506,9 +512,50 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
     protected abstract CompletableFuture<Stat> storePut(String path, byte[] data, Optional<Long> optExpectedVersion,
                                                         EnumSet<CreateOption> options);
 
+    protected CompletableFuture<Stat> storePut(String path, byte[] data, Optional<Long> optExpectedVersion,
+                                               EnumSet<CreateOption> options,
+                                               Map<String, String> secondaryIndexes) {
+        return storePut(path, data, optExpectedVersion, options);
+    }
+
+    @Override
+    public CompletableFuture<List<GetResult>> findByIndex(
+            String scanPathPrefix, String indexName, String secondaryKey,
+            Predicate<GetResult> fallbackFilter) {
+        if (isClosed()) {
+            return alreadyClosedFailedFuture();
+        }
+        return storeFindByIndex(scanPathPrefix, indexName, secondaryKey, fallbackFilter);
+    }
+
+    protected CompletableFuture<List<GetResult>> storeFindByIndex(
+            String scanPathPrefix, String indexName, String secondaryKey,
+            Predicate<GetResult> fallbackFilter) {
+        // Default fallback: full scan under scanPathPrefix, applying fallbackFilter to each result.
+        return getChildrenFromStore(scanPathPrefix)
+                .thenCompose(children -> {
+                    List<CompletableFuture<Optional<GetResult>>> futures = children.stream()
+                            .map(child -> storeGet(scanPathPrefix + "/" + child))
+                            .toList();
+                    return FutureUtil.waitForAll(futures)
+                            .thenApply(__ -> futures.stream()
+                                    .map(CompletableFuture::join)
+                                    .filter(Optional::isPresent)
+                                    .map(Optional::get)
+                                    .filter(fallbackFilter)
+                                    .toList());
+                });
+    }
+
     @Override
     public final CompletableFuture<Stat> put(String path, byte[] data, Optional<Long> optExpectedVersion,
             EnumSet<CreateOption> options) {
+        return put(path, data, optExpectedVersion, options, Collections.emptyMap());
+    }
+
+    @Override
+    public final CompletableFuture<Stat> put(String path, byte[] data, Optional<Long> optExpectedVersion,
+            EnumSet<CreateOption> options, Map<String, String> secondaryIndexes) {
         if (isClosed()) {
             return alreadyClosedFailedFuture();
         }
@@ -525,7 +572,7 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
                     Instant.now().toEpochMilli(), getMetadataEventSynchronizer().get().getClusterName(),
                     NotificationType.Modified);
             return getMetadataEventSynchronizer().get().notify(event)
-                    .thenCompose(__ -> putInternal(path, data, optExpectedVersion, options))
+                    .thenCompose(__ -> putInternal(path, data, optExpectedVersion, options, secondaryIndexes))
                     .whenComplete((v, t) -> {
                         if (t != null) {
                             metadataStoreStats.recordPutOpsFailed(System.currentTimeMillis() - start);
@@ -535,7 +582,7 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
                         }
                     });
         } else {
-            return putInternal(path, data, optExpectedVersion, options)
+            return putInternal(path, data, optExpectedVersion, options, secondaryIndexes)
                     .whenComplete((v, t) -> {
                         if (t != null) {
                             metadataStoreStats.recordPutOpsFailed(System.currentTimeMillis() - start);
@@ -547,11 +594,18 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
         }
 
     }
+
     public final CompletableFuture<Stat> putInternal(String path, byte[] data, Optional<Long> optExpectedVersion,
             Set<CreateOption> options) {
+        return putInternal(path, data, optExpectedVersion, options, Collections.emptyMap());
+    }
+
+    public final CompletableFuture<Stat> putInternal(String path, byte[] data, Optional<Long> optExpectedVersion,
+            Set<CreateOption> options, Map<String, String> secondaryIndexes) {
+        var enumOptions =
+                (options != null && !options.isEmpty()) ? EnumSet.copyOf(options) : EnumSet.noneOf(CreateOption.class);
         // Ensure caches are invalidated before the operation is confirmed
-        return storePut(path, data, optExpectedVersion,
-                (options != null && !options.isEmpty()) ? EnumSet.copyOf(options) : EnumSet.noneOf(CreateOption.class))
+        return storePut(path, data, optExpectedVersion, enumOptions, secondaryIndexes)
                 .thenApply(stat -> {
                     NotificationType type = stat.isFirstVersion() ? NotificationType.Created
                             : NotificationType.Modified;
@@ -579,7 +633,7 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
 
         // Clear cache after session expired.
         if (event == SessionEvent.SessionReestablished || event == SessionEvent.Reconnected) {
-            for (MetadataCacheImpl metadataCache : metadataCaches) {
+            for (MetadataCacheImpl<?> metadataCache : metadataCaches) {
                 metadataCache.invalidateAll();
             }
             invalidateAll();
@@ -672,7 +726,7 @@ public abstract class AbstractMetadataStore implements MetadataStoreExtended, Co
      * 3. not ends with '/', except root path "/"
      */
    static boolean isValidPath(String path) {
-        return StringUtils.equals(path, "/")
+        return "/".equals(path)
                 || StringUtils.isNotBlank(path)
                 && path.startsWith("/")
                 && !path.endsWith("/");

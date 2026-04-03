@@ -42,8 +42,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import lombok.Cleanup;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.client.BookKeeper;
-import org.apache.bookkeeper.client.BookKeeperTestClient;
 import org.apache.bookkeeper.client.LedgerEntry;
+import org.apache.bookkeeper.client.PulsarBookKeeperTestClient;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.AddEntryCallback;
@@ -59,7 +59,7 @@ import org.apache.bookkeeper.mledger.ManagedLedgerFactoryConfig;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.impl.cache.EntryCacheManager;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats;
+import org.apache.bookkeeper.mledger.proto.PositionInfo;
 import org.apache.bookkeeper.mledger.util.ThrowableToStringUtil;
 import org.apache.bookkeeper.test.BookKeeperClusterTestCase;
 import org.apache.pulsar.common.policies.data.PersistentOfflineTopicStats;
@@ -133,7 +133,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         bkc.close();
         metadataStore.unsetAlwaysFail();
 
-        bkc = new BookKeeperTestClient(baseClientConf);
+        bkc = new PulsarBookKeeperTestClient(baseClientConf);
         int port = startNewBookie();
 
         // Reconnect a new bk client
@@ -187,7 +187,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         final AtomicBoolean done = new AtomicBoolean();
         final CyclicBarrier barrier = new CyclicBarrier(numProducers + numConsumers + 1);
 
-        List<Future<?>> futures = new ArrayList();
+        List<Future<?>> futures = new ArrayList<>();
 
         for (int i = 0; i < numProducers; i++) {
             futures.add(executor.submit(() -> {
@@ -266,7 +266,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         final AtomicBoolean done = new AtomicBoolean();
         final CyclicBarrier barrier = new CyclicBarrier(numProducers + numConsumers + 1);
 
-        List<Future<?>> futures = new ArrayList();
+        List<Future<?>> futures = new ArrayList<>();
         List<Position> positions = new CopyOnWriteArrayList<>();
 
         for (int i = 0; i < numProducers; i++) {
@@ -375,12 +375,12 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         mlConfig.setMetadataMaxEntriesPerLedger(10);
         ManagedLedger ledger = factory.open("ml-markdelete-ledger", mlConfig);
 
-        final List<Position> addedEntries = new ArrayList();
+        final List<Position> addedEntries = new ArrayList<>();
 
         int numCursors = 10;
         final CyclicBarrier barrier = new CyclicBarrier(numCursors);
 
-        List<ManagedCursor> cursors = new ArrayList();
+        List<ManagedCursor> cursors = new ArrayList<>();
         for (int i = 0; i < numCursors; i++) {
             cursors.add(ledger.openCursor(String.format("c%d", i)));
         }
@@ -390,7 +390,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
             addedEntries.add(pos);
         }
 
-        List<Future<?>> futures = new ArrayList();
+        List<Future<?>> futures = new ArrayList<>();
 
         for (ManagedCursor cursor : cursors) {
             futures.add(executor.submit(() -> {
@@ -424,7 +424,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         ManagedLedger ledger = factory.open("my_test_ledger" + testName, config);
         ManagedCursor cursor = ledger.openCursor("c1");
 
-        List<Position> positions = new ArrayList();
+        List<Position> positions = new ArrayList<>();
 
         for (int i = 0; i < 10; i++) {
             Position p = ledger.addEntry("entry".getBytes());
@@ -432,7 +432,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         }
 
         final CountDownLatch counter = new CountDownLatch(positions.size());
-        final AtomicReference<Exception> gotException = new AtomicReference();
+        final AtomicReference<Exception> gotException = new AtomicReference<>();
 
         for (Position p : positions) {
             cursor.asyncDelete(p, new DeleteCallback() {
@@ -542,7 +542,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         ManagedLedgerConfig config = new ManagedLedgerConfig();
         config.setEnsembleSize(1).setWriteQuorumSize(1).setAckQuorumSize(1).setMetadataEnsembleSize(1)
                 .setMetadataAckQuorumSize(1);
-        ManagedLedger ledger = factory.open("property/cluster/namespace/my-ledger", config);
+        ManagedLedger ledger = factory.open("property/namespace/my-ledger", config);
         ManagedCursor cursor = ledger.openCursor("c1");
 
         int num = 1;
@@ -560,7 +560,7 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         ManagedLedgerOfflineBacklog offlineTopicBacklog = new ManagedLedgerOfflineBacklog(
                 DigestType.CRC32, "".getBytes(StandardCharsets.UTF_8), "", false);
         PersistentOfflineTopicStats offlineTopicStats = offlineTopicBacklog.getEstimatedUnloadedTopicBacklog(
-                (ManagedLedgerFactoryImpl) factory, "property/cluster/namespace/my-ledger");
+                (ManagedLedgerFactoryImpl) factory, "property/namespace/my-ledger");
         assertNotNull(offlineTopicStats);
     }
 
@@ -804,11 +804,12 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         // Verify: the config affects.
         long cursorLedgerLac = cursor1.cursorLedger.getLastAddConfirmed();
         LedgerEntry ledgerEntry = cursor1.cursorLedger.readEntries(cursorLedgerLac, cursorLedgerLac).nextElement();
-        MLDataFormats.PositionInfo positionInfo = MLDataFormats.PositionInfo.parseFrom(ledgerEntry.getEntry());
+        PositionInfo positionInfo = new PositionInfo();
+        positionInfo.parseFrom(ledgerEntry.getEntry());
         if (enable) {
-            assertNotEquals(positionInfo.getIndividualDeletedMessageRangesList().size(), 0);
+            assertNotEquals(positionInfo.getIndividualDeletedMessageRangesCount(), 0);
         } else {
-            assertEquals(positionInfo.getIndividualDeletedMessageRangesList().size(), 0);
+            assertEquals(positionInfo.getIndividualDeletedMessageRangesCount(), 0);
         }
 
         // cleanup

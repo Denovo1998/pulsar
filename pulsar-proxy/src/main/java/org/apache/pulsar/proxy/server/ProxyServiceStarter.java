@@ -127,6 +127,7 @@ public class ProxyServiceStarter {
         this(args, null, false);
     }
 
+    @SuppressWarnings("deprecation")
     public ProxyServiceStarter(String[] args, Consumer<ProxyConfiguration> proxyConfigurationCustomizer,
                                boolean embeddedMode) throws Exception {
         this.embeddedMode = embeddedMode;
@@ -450,15 +451,12 @@ public class ProxyServiceStarter {
             }
             final JettyWebSocketServlet producerWebSocketServlet = new WebSocketProducerServlet(webSocketService);
             addWebSocketServlet(server, WebSocketProducerServlet.SERVLET_PATH, producerWebSocketServlet);
-            addWebSocketServlet(server, WebSocketProducerServlet.SERVLET_PATH_V2, producerWebSocketServlet);
 
             final JettyWebSocketServlet consumerWebSocketServlet = new WebSocketConsumerServlet(webSocketService);
             addWebSocketServlet(server, WebSocketConsumerServlet.SERVLET_PATH, consumerWebSocketServlet);
-            addWebSocketServlet(server, WebSocketConsumerServlet.SERVLET_PATH_V2, consumerWebSocketServlet);
 
             final JettyWebSocketServlet readerWebSocketServlet = new WebSocketReaderServlet(webSocketService);
             addWebSocketServlet(server, WebSocketReaderServlet.SERVLET_PATH, readerWebSocketServlet);
-            addWebSocketServlet(server, WebSocketReaderServlet.SERVLET_PATH_V2, readerWebSocketServlet);
 
             final WebSocketMultiTopicConsumerServlet multiTopicConsumerWebSocketServlet =
                     new WebSocketMultiTopicConsumerServlet(webSocketService);

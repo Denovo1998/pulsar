@@ -49,11 +49,11 @@ import lombok.Cleanup;
 import org.apache.bookkeeper.bookie.BookieImpl;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
-import org.apache.bookkeeper.client.BookKeeperTestClient;
 import org.apache.bookkeeper.client.ClientUtil;
 import org.apache.bookkeeper.client.EnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.LedgerEntry;
 import org.apache.bookkeeper.client.LedgerHandle;
+import org.apache.bookkeeper.client.PulsarBookKeeperTestClient;
 import org.apache.bookkeeper.client.RackawareEnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.ZoneawareEnsemblePlacementPolicy;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
@@ -87,6 +87,7 @@ import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.commons.lang3.reflect.FieldUtils;
 import org.apache.pulsar.metadata.bookkeeper.PulsarLedgerManagerFactory;
 import org.apache.pulsar.metadata.bookkeeper.PulsarMetadataClientDriver;
+import org.apache.pulsar.metadata.impl.DualMetadataStore;
 import org.apache.pulsar.metadata.impl.ZKMetadataStore;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.ZooKeeper;
@@ -854,8 +855,9 @@ public class TestReplicationWorker extends BookKeeperClusterTestCase {
      * Test that the replication worker will not shutdown on a simple ZK disconnection.
      */
     @Test
+    @SuppressWarnings("try")
     public void testRWZKConnectionLost() throws Exception {
-        try (ZooKeeperClient zk = ZooKeeperClient.newBuilder()
+        try (ZooKeeperClient ignored = ZooKeeperClient.newBuilder()
                 .connectString(zkUtil.getZooKeeperConnectString())
                 .sessionTimeoutMs(10000)
                 .build()) {
@@ -990,6 +992,7 @@ public class TestReplicationWorker extends BookKeeperClusterTestCase {
         testRepairedNotAdheringPlacementPolicyLedgerFragments(RackawareEnsemblePlacementPolicy.class, null);
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testReplicationStats() throws Exception {
         BiConsumer<Boolean, ReplicationWorker> checkReplicationStats = (first, rw) -> {
@@ -1032,7 +1035,7 @@ public class TestReplicationWorker extends BookKeeperClusterTestCase {
         testRepairedNotAdheringPlacementPolicyLedgerFragments(
                 RackawareEnsemblePlacementPolicy.class, checkReplicationStats);
     }
-
+    @SuppressWarnings({"deprecation", "try"})
     private void testRepairedNotAdheringPlacementPolicyLedgerFragments(
             Class<? extends EnsemblePlacementPolicy> placementPolicyClass,
             BiConsumer<Boolean, ReplicationWorker> checkReplicationStats) throws Exception {
@@ -1047,7 +1050,7 @@ public class TestReplicationWorker extends BookKeeperClusterTestCase {
         baseClientConf.setProperty("reppDnsResolverClass", StaticDNSResolver.class.getName());
         baseClientConf.setProperty("enforceStrictZoneawarePlacement", false);
         bkc.close();
-        bkc = new BookKeeperTestClient(baseClientConf) {
+        bkc = new PulsarBookKeeperTestClient(baseClientConf) {
             @Override
             protected EnsemblePlacementPolicy initializeEnsemblePlacementPolicy(ClientConfiguration conf,
                                                                          DNSToSwitchMapping dnsResolver,
@@ -1110,7 +1113,7 @@ public class TestReplicationWorker extends BookKeeperClusterTestCase {
         assertNotNull(stat);
 
         baseConf.setRepairedPlacementPolicyNotAdheringBookieEnable(true);
-        BookKeeper bookKeeper = new BookKeeperTestClient(baseClientConf) {
+        BookKeeper bookKeeper = new PulsarBookKeeperTestClient(baseClientConf) {
             @Override
             protected EnsemblePlacementPolicy initializeEnsemblePlacementPolicy(ClientConfiguration conf,
                                                                          DNSToSwitchMapping dnsResolver,
@@ -1242,7 +1245,8 @@ public class TestReplicationWorker extends BookKeeperClusterTestCase {
                 (PulsarLedgerManagerFactory) pulsarMetadataClientDriver.getLedgerManagerFactory();
         Field field = pulsarLedgerManagerFactory.getClass().getDeclaredField("store");
         field.setAccessible(true);
-        ZKMetadataStore zkMetadataStore = (ZKMetadataStore) field.get(pulsarLedgerManagerFactory);
+        DualMetadataStore store = (DualMetadataStore) field.get(pulsarLedgerManagerFactory);
+        ZKMetadataStore zkMetadataStore = (ZKMetadataStore) store.getSourceStore();
         return zkMetadataStore.getZkClient();
     }
 }

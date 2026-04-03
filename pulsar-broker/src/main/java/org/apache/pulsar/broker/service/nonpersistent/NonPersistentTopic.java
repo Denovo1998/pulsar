@@ -264,6 +264,7 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     public CompletableFuture<Consumer> subscribe(final TransportCnx cnx, String subscriptionName, long consumerId,
                                                  SubType subType, int priorityLevel, String consumerName,
                                                  boolean isDurable, MessageId startMessageId,
@@ -583,7 +584,7 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
     @Override
     public CompletableFuture<Void> checkReplication() {
         TopicName name = TopicName.get(topic);
-        if (!name.isGlobal() || NamespaceService.isHeartbeatNamespace(name)
+        if (NamespaceService.isHeartbeatNamespace(name)
                 || ExtensibleLoadManagerImpl.isInternalTopic(topic)) {
             return CompletableFuture.completedFuture(null);
         }
@@ -901,6 +902,7 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public CompletableFuture<NonPersistentTopicStatsImpl> asyncGetStats(boolean getPreciseBacklog,
                                                                         boolean subscriptionBacklogSize,
                                                                         boolean getEarliestTimeInBacklog) {
@@ -990,11 +992,8 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
     }
 
     public boolean isActive() {
-        if (TopicName.get(topic).isGlobal()) {
-            // No local consumers and no local producers
-            return !subscriptions.isEmpty() || hasLocalProducers();
-        }
-        return currentUsageCount() != 0 || !subscriptions.isEmpty();
+        // No local consumers and no local producers
+        return !subscriptions.isEmpty() || hasLocalProducers();
     }
 
     @Override
@@ -1050,34 +1049,31 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
         } else {
             if (System.nanoTime() - lastActive > TimeUnit.SECONDS.toNanos(maxInactiveDurationInSec)) {
 
-                if (TopicName.get(topic).isGlobal()) {
-                    // For global namespace, close repl producers first.
-                    // Once all repl producers are closed, we can delete the topic,
-                    // provided no remote producers connected to the broker.
-                    if (log.isDebugEnabled()) {
-                        log.debug("[{}] Global topic inactive for {} seconds, closing repl producers.", topic,
-                            maxInactiveDurationInSec);
-                    }
-
-                    stopReplProducers().thenCompose(v -> delete(true, false))
-                            .thenCompose(__ -> tryToDeletePartitionedMetadata())
-                            .thenRun(() -> log.info("[{}] Topic deleted successfully due to inactivity", topic))
-                            .exceptionally(e -> {
-                                Throwable throwable = e.getCause();
-                                if (throwable instanceof TopicBusyException) {
-                                    // topic became active again
-                                    if (log.isDebugEnabled()) {
-                                        log.debug("[{}] Did not delete busy topic: {}", topic,
-                                                throwable.getMessage());
-                                    }
-                                    replicators.forEach((region, replicator) -> replicator.startProducer());
-                                } else {
-                                    log.warn("[{}] Inactive topic deletion failed", topic, e);
-                                }
-                                return null;
-                            });
-
+                // Close repl producers first.
+                // Once all repl producers are closed, we can delete the topic,
+                // provided no remote producers connected to the broker.
+                if (log.isDebugEnabled()) {
+                    log.debug("[{}] Topic inactive for {} seconds, closing repl producers.", topic,
+                        maxInactiveDurationInSec);
                 }
+
+                stopReplProducers().thenCompose(v -> delete(true, false))
+                        .thenCompose(__ -> tryToDeletePartitionedMetadata())
+                        .thenRun(() -> log.info("[{}] Topic deleted successfully due to inactivity", topic))
+                        .exceptionally(e -> {
+                            Throwable throwable = e.getCause();
+                            if (throwable instanceof TopicBusyException) {
+                                // topic became active again
+                                if (log.isDebugEnabled()) {
+                                    log.debug("[{}] Did not delete busy topic: {}", topic,
+                                            throwable.getMessage());
+                                }
+                                replicators.forEach((region, replicator) -> replicator.startProducer());
+                            } else {
+                                log.warn("[{}] Inactive topic deletion failed", topic, e);
+                            }
+                            return null;
+                        });
             }
         }
     }
@@ -1218,7 +1214,8 @@ public class NonPersistentTopic extends AbstractTopic implements Topic, TopicPol
 
     @Override
     public CompletableFuture<MessageId> getLastMessageId() {
-        throw new UnsupportedOperationException("getLastMessageId is not supported on non-persistent topic");
+        return FutureUtil.failedFuture(
+                new UnsupportedOperationException("getLastMessageId is not supported on non-persistent topic"));
     }
 
     private static final Logger log = LoggerFactory.getLogger(NonPersistentTopic.class);

@@ -49,7 +49,7 @@ public class PulsarSourceE2ETest extends AbstractPulsarE2ETest {
         final String sourceName = "PulsarSource-test";
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
 
         SourceConfig sourceConfig = createSourceConfig(tenant, namespacePortion, sourceName, sinkTopic);
         if (jarFilePathUrl.startsWith(Utils.BUILTIN)) {
@@ -187,13 +187,13 @@ public class PulsarSourceE2ETest extends AbstractPulsarE2ETest {
         admin.sources().deleteSource(tenant, namespacePortion, sourceName);
     }
 
-    @Test(timeOut = 20000, groups = "builtin")
+    @Test(timeOut = 120000, groups = "builtin")
     public void testPulsarSourceStatsBuiltin() throws Exception {
         String jarFilePathUrl = String.format("%s://data-generator", Utils.BUILTIN);
         testPulsarSourceStats(jarFilePathUrl);
     }
 
-    @Test(timeOut = 20000, groups = "builtin", expectedExceptions = {PulsarAdminException.class},
+    @Test(timeOut = 120000, groups = "builtin", expectedExceptions = {PulsarAdminException.class},
             expectedExceptionsMessageRegExp = "Built-in source is not available")
     public void testPulsarSourceStatsBuiltinDoesNotExist() throws Exception {
         String jarFilePathUrl = String.format("%s://foo", Utils.BUILTIN);

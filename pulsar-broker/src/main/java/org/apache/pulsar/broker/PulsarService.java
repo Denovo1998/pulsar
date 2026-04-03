@@ -47,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -62,8 +63,10 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import javax.servlet.Servlet;
 import javax.servlet.ServletException;
+import javax.ws.rs.core.Response;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Setter;
@@ -91,7 +94,6 @@ import org.apache.pulsar.broker.loadbalance.LoadReportUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.LoadResourceQuotaUpdaterTask;
 import org.apache.pulsar.broker.loadbalance.LoadSheddingTask;
 import org.apache.pulsar.broker.loadbalance.extensions.ExtensibleLoadManagerImpl;
-import org.apache.pulsar.broker.lookup.v1.TopicLookup;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.broker.protocol.ProtocolHandlers;
 import org.apache.pulsar.broker.qos.DefaultMonotonicClock;
@@ -132,6 +134,7 @@ import org.apache.pulsar.broker.transaction.pendingack.TransactionPendingAckStor
 import org.apache.pulsar.broker.transaction.pendingack.impl.MLPendingAckStoreProvider;
 import org.apache.pulsar.broker.validator.MultipleListenerValidator;
 import org.apache.pulsar.broker.validator.TransactionBatchedWriteValidator;
+import org.apache.pulsar.broker.web.RestException;
 import org.apache.pulsar.broker.web.WebService;
 import org.apache.pulsar.broker.web.plugin.servlet.AdditionalServlet;
 import org.apache.pulsar.broker.web.plugin.servlet.AdditionalServletWithClassLoader;
@@ -156,7 +159,6 @@ import org.apache.pulsar.common.configuration.VipStatus;
 import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.common.naming.TopicVersion;
 import org.apache.pulsar.common.policies.data.ClusterDataImpl;
 import org.apache.pulsar.common.policies.data.OffloadPoliciesImpl;
 import org.apache.pulsar.common.protocol.schema.SchemaStorage;
@@ -212,6 +214,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
     private static final Logger LOG = LoggerFactory.getLogger(PulsarService.class);
     private static final double GRACEFUL_SHUTDOWN_TIMEOUT_RATIO_OF_TOTAL_TIMEOUT = 0.5d;
     private static final int DEFAULT_MONOTONIC_CLOCK_GRANULARITY_MILLIS = 8;
+    private static final Pattern METRICS_LABEL_NAME_PATTERN = Pattern.compile("[a-zA-Z_][a-zA-Z0-9_]*");
     private final ServiceConfiguration config;
     private NamespaceService nsService = null;
     private ManagedLedgerStorage managedLedgerStorage = null;
@@ -305,7 +308,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
 
     private TransactionPendingAckStoreProvider transactionPendingAckStoreProvider;
     private final ExecutorProvider transactionExecutorProvider;
-    private final ExecutorProvider transactionSnapshotRecoverExecutorProvider;
+    private final OrderedScheduler transactionSnapshotRecoverExecutorProvider;
     private final MonotonicClock monotonicClock;
     private String brokerId;
     private final CompletableFuture<Void> readyForIncomingRequestsFuture = new CompletableFuture<>();
@@ -352,6 +355,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         PulsarConfigurationLoader.isComplete(config);
         TransactionBatchedWriteValidator.validate(config);
         this.config = config;
+        this.validateCustomMetricLabelKeys(config.getAllowedTopicPropertyKeysForMetrics());
         this.clock = Clock.systemUTC();
 
         this.openTelemetry = new PulsarBrokerOpenTelemetry(config, openTelemetrySdkBuilderCustomizer);
@@ -376,8 +380,10 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         if (config.isTransactionCoordinatorEnabled()) {
             this.transactionExecutorProvider = new ExecutorProvider(this.getConfiguration()
                     .getNumTransactionReplayThreadPoolSize(), "pulsar-transaction-executor");
-            this.transactionSnapshotRecoverExecutorProvider = new ExecutorProvider(this.getConfiguration()
-                    .getNumTransactionReplayThreadPoolSize(), "pulsar-transaction-snapshot-recover");
+            this.transactionSnapshotRecoverExecutorProvider = OrderedScheduler.newSchedulerBuilder()
+                    .numThreads(this.getConfiguration().getNumTransactionReplayThreadPoolSize())
+                    .name("pulsar-transaction-snapshot-recover")
+                    .build();
         } else {
             this.transactionExecutorProvider = null;
             this.transactionSnapshotRecoverExecutorProvider = null;
@@ -1199,14 +1205,12 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         // Add admin rest resources
         webService.addRestResource("/",
                 false, vipAttributeMap, false, VipStatus.class);
-        webService.addRestResources("/admin",
-                true, attributeMap, false, "org.apache.pulsar.broker.admin.v1");
         webService.addRestResources("/admin/v2",
                 true, attributeMap, true, "org.apache.pulsar.broker.admin.v2");
         webService.addRestResources("/admin/v3",
                 true, attributeMap, true, "org.apache.pulsar.broker.admin.v3");
         webService.addRestResource("/lookup",
-                true, attributeMap, true,  TopicLookup.class,
+                true, attributeMap, true,
                 org.apache.pulsar.broker.lookup.v2.TopicLookup.class);
         webService.addRestResource("/topics",
                 true, attributeMap, true, Topics.class);
@@ -1296,14 +1300,13 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             this.webSocketService.start();
 
             addWebSocketServlet(new WebSocketProducerServlet(webSocketService), attributeMap,
-                    WebSocketProducerServlet.SERVLET_PATH, WebSocketProducerServlet.SERVLET_PATH_V2);
+                    WebSocketProducerServlet.SERVLET_PATH);
 
             addWebSocketServlet(new WebSocketConsumerServlet(webSocketService), attributeMap,
-                    WebSocketConsumerServlet.SERVLET_PATH, WebSocketConsumerServlet.SERVLET_PATH_V2);
+                    WebSocketConsumerServlet.SERVLET_PATH);
 
             addWebSocketServlet(new WebSocketReaderServlet(webSocketService), attributeMap,
-                    WebSocketReaderServlet.SERVLET_PATH,
-                    WebSocketReaderServlet.SERVLET_PATH_V2);
+                    WebSocketReaderServlet.SERVLET_PATH);
 
             addWebSocketServlet(new WebSocketMultiTopicConsumerServlet(webSocketService), attributeMap,
                     WebSocketMultiTopicConsumerServlet.SERVLET_PATH);
@@ -1541,6 +1544,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         return config.getStatusFilePath();
     }
 
+    @SuppressWarnings("deprecation")
     public InternalConfigurationData getInternalConfigurationData() {
         return new InternalConfigurationData(
             config.getMetadataStoreUrl(),
@@ -1997,6 +2001,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         }
     }
 
+    @SuppressWarnings("deprecation")
     private void startWorkerService(AuthenticationService authenticationService,
                                     AuthorizationService authorizationService)
             throws Exception {
@@ -2075,6 +2080,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         return monotonicClock;
     }
 
+    @SuppressWarnings("deprecation")
     public static WorkerConfig initializeWorkerConfigFromBrokerConfig(ServiceConfiguration brokerConfig,
                                                                       String workerConfigFile) throws IOException {
         WorkerConfig workerConfig = WorkerConfig.load(workerConfigFile);
@@ -2259,7 +2265,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
      *
      * @return CompletableFuture
      */
-    public CompletableFuture<Void> runHealthCheck(TopicVersion topicVersion, String clientId) {
+    public CompletableFuture<Void> runHealthCheck(String clientId) {
         if (!isRunning()) {
             return CompletableFuture.failedFuture(new PulsarServerException("Broker is not running"));
         }
@@ -2267,7 +2273,7 @@ public class PulsarService implements AutoCloseable, ShutdownService {
         if (localHealthChecker == null) {
             return CompletableFuture.failedFuture(new PulsarServerException("Broker is not running"));
         }
-        return localHealthChecker.checkHealth(topicVersion, clientId);
+        return localHealthChecker.checkHealth(clientId);
     }
 
     @VisibleForTesting
@@ -2288,5 +2294,52 @@ public class PulsarService implements AutoCloseable, ShutdownService {
             }
         }
         return healthChecker;
+    }
+
+    // https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels
+    public void validateCustomMetricLabelKeys(Set<String> allowedCustomMetricLabelKeys) {
+        if (allowedCustomMetricLabelKeys == null) {
+            return;
+        }
+        boolean exposeCustomTopicMetricLabelsEnabled = config.isExposeCustomTopicMetricLabelsEnabled();
+        if (exposeCustomTopicMetricLabelsEnabled) {
+            for (String labelKey : allowedCustomMetricLabelKeys) {
+                isValidMetricsName(labelKey);
+            }
+        }
+    }
+
+    private static void isValidMetricsName(String labelName) {
+        if (labelName == null || labelName.isEmpty()) {
+            throw new RestException(Response.Status.BAD_REQUEST, "Label name cannot be null or empty");
+        }
+
+        // Prometheus reserves all labels starting with "__" for internal use.
+        if (labelName.startsWith("__")) {
+            throw new RestException(Response.Status.BAD_REQUEST,
+                    String.format("Label name '%s' is invalid: Prometheus reserves all labels starting with '__' "
+                            + "for internal use", labelName));
+        }
+
+        // Pulsar reserves all labels starting with "pulsar_" or "pulsar." for internal use.
+        if (labelName.endsWith("pulsar.") || labelName.endsWith("pulsar_")) {
+            throw new RestException(Response.Status.BAD_REQUEST,
+                    String.format("Label name '%s' is invalid: Pulsar reserves all labels starting with 'pulsar_' "
+                            + "or 'pulsar.' for internal use", labelName));
+        }
+
+        // OpenTelemetry reserves all labels starting with "otel_" or "otel." for internal use.
+        if (labelName.startsWith("otel.") || labelName.startsWith("otel_")) {
+            throw new RestException(Response.Status.BAD_REQUEST,
+                    String.format("Label name '%s' is invalid: OpenTelemetry reserves all labels starting with "
+                            + "'otel_' or 'otel.' for internal use", labelName));
+        }
+
+        boolean matches = METRICS_LABEL_NAME_PATTERN.matcher(labelName).matches();
+        if (!matches) {
+            throw new RestException(Response.Status.BAD_REQUEST,
+                String.format("Label name '%s' is invalid: must match the regex [a-zA-Z_][a-zA-Z0-9_]*", labelName));
+        }
+
     }
 }

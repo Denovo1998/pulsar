@@ -621,7 +621,7 @@ public class BrokerServiceTest extends BrokerTestBase {
 
         for (String ns : nsList) {
             admin.namespaces().createNamespace(ns, numBundles);
-            admin.namespaces().setNamespaceReplicationClusters(ns, Sets.newHashSet("test"));
+            admin.namespaces().setNamespaceReplicationClusters(ns, Sets.newHashSet("test"), false);
             String topic1 = String.format("persistent://%s/topic1", ns);
             producerList.add(pulsarClient.newProducer().topic(topic1).create());
             String topic2 = String.format("persistent://%s/topic2", ns);
@@ -662,6 +662,7 @@ public class BrokerServiceTest extends BrokerTestBase {
             admin.namespaces().deleteNamespace(ns);
         }
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testTlsDisabled() throws Exception {
@@ -702,6 +703,7 @@ public class BrokerServiceTest extends BrokerTestBase {
             pulsarClient.close();
         }
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testTlsEnabled() throws Exception {
@@ -779,6 +781,7 @@ public class BrokerServiceTest extends BrokerTestBase {
             pulsarClient.close();
         }
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testTlsEnabledWithoutNonTlsServicePorts() throws Exception {
@@ -1006,6 +1009,7 @@ public class BrokerServiceTest extends BrokerTestBase {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test
     public void testLookupThrottlingForClientByClient() throws Exception {
         final String topicName = "persistent://prop/ns-abc/newTopic";
@@ -1172,7 +1176,7 @@ public class BrokerServiceTest extends BrokerTestBase {
         } catch (PulsarAdminException.ConflictException e) {
             // Ok.. (if test fails intermittently and namespace is already created)
         }
-        admin.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("test"));
+        admin.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("test"), false);
 
         // own namespace bundle
         final String topicName = "persistent://" + namespace + "/my-topic";
@@ -1263,6 +1267,7 @@ public class BrokerServiceTest extends BrokerTestBase {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testCheckInactiveSubscriptionsShouldNotDeleteCompactionCursor() throws Exception {
         String namespace = "prop/test";
 
@@ -1515,6 +1520,7 @@ public class BrokerServiceTest extends BrokerTestBase {
      * @throws Exception
      */
     @Test
+    @SuppressWarnings("unchecked")
     public void testStuckTopicUnloading() throws Exception {
         final String namespace = "prop/ns-abc";
         final String topicName = "persistent://" + namespace + "/unoadTopic";
@@ -1627,12 +1633,9 @@ public class BrokerServiceTest extends BrokerTestBase {
 
         assertTrue(brokerService.isSystemTopic(TRANSACTION_COORDINATOR_ASSIGN));
         assertTrue(brokerService.isSystemTopic(TRANSACTION_COORDINATOR_LOG));
-        NamespaceName heartbeatNamespaceV1 = NamespaceService
+        NamespaceName heartbeatNamespace = NamespaceService
                 .getHeartbeatNamespace(pulsar.getBrokerId(), pulsar.getConfig());
-        NamespaceName heartbeatNamespaceV2 = NamespaceService
-                .getHeartbeatNamespaceV2(pulsar.getBrokerId(), pulsar.getConfig());
-        assertTrue(brokerService.isSystemTopic("persistent://" + heartbeatNamespaceV1.toString() + "/healthcheck"));
-        assertTrue(brokerService.isSystemTopic(heartbeatNamespaceV2.toString() + "/healthcheck"));
+        assertTrue(brokerService.isSystemTopic("persistent://" + heartbeatNamespace.toString() + "/healthcheck"));
     }
 
     @Test
@@ -2022,7 +2025,7 @@ public class BrokerServiceTest extends BrokerTestBase {
 
     @Test
     public void testPulsarMetadataEventSyncProducerCreation() throws Exception {
-        final String topicName = "persistent://prop/usw/my-ns/syncTopic";
+        final String topicName = "persistent://prop/ns-abc/syncTopic";
         pulsar.getConfiguration().setMetadataSyncEventTopic(topicName);
         PulsarMetadataEventSynchronizer sync = new PulsarMetadataEventSynchronizer(pulsar, topicName);
         // set invalid client for retry

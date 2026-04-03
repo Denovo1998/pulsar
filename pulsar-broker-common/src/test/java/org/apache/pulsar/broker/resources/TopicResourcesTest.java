@@ -58,16 +58,6 @@ public class TopicResourcesTest {
     }
 
     @Test
-    public void testListenerInvokedWhenTopicV1Created() {
-        TopicListener listener = mock(TopicListener.class);
-        when(listener.getNamespaceName()).thenReturn(NamespaceName.get("tenant/cluster/namespace"));
-        topicResources.registerPersistentTopicListener(listener);
-        topicResources.handleNotification(new Notification(NotificationType.Created,
-                "/managed-ledgers/tenant/cluster/namespace/persistent/topic"));
-        verify(listener).onTopicEvent("persistent://tenant/cluster/namespace/topic", NotificationType.Created);
-    }
-
-    @Test
     public void testListenerInvokedWhenTopicDeleted() {
         TopicListener listener = mock(TopicListener.class);
         when(listener.getNamespaceName()).thenReturn(NamespaceName.get("tenant/namespace"));
@@ -161,9 +151,10 @@ public class TopicResourcesTest {
         verify(listener).onTopicEvent("persistent://tenant/name.pace/topic", NotificationType.Created);
     }
 
+    @SuppressWarnings({"deprecation", "unchecked"})
     @Test
     public void testBiConsumerListenerNotInvokedAfterDeregistered() {
-        BiConsumer listener = mock(BiConsumer.class);
+        BiConsumer<String, NotificationType> listener = mock(BiConsumer.class);
         topicResources.registerPersistentTopicListener(NamespaceName.get("tenant/namespace"), listener);
         topicResources.handleNotification(new Notification(NotificationType.Created,
                 "/managed-ledgers/tenant/namespace/persistent/topic"));

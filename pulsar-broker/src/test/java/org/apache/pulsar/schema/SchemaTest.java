@@ -20,7 +20,6 @@ package org.apache.pulsar.schema;
 
 import static org.apache.pulsar.common.naming.TopicName.PUBLIC_TENANT;
 import static org.apache.pulsar.schema.compatibility.SchemaCompatibilityCheckTest.randomName;
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotEquals;
@@ -41,7 +40,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -60,10 +58,9 @@ import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.pulsar.broker.BrokerTestUtil;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.broker.service.schema.BookkeeperSchemaStorage;
+import org.apache.pulsar.broker.service.schema.SchemaLocator;
 import org.apache.pulsar.broker.service.schema.SchemaRegistry;
 import org.apache.pulsar.broker.service.schema.SchemaRegistryServiceImpl;
-import org.apache.pulsar.broker.service.schema.SchemaStorageFormat;
-import org.apache.pulsar.broker.service.schema.SchemaStorageFormat.SchemaLocator;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
@@ -723,6 +720,7 @@ public class SchemaTest extends MockedPulsarServiceBaseTest {
         testKeyValueSchemaWithStructs(KeyValueEncodingType.SEPARATED);
     }
 
+    @SuppressWarnings("unchecked")
     private void testKeyValueSchemaWithStructs(KeyValueEncodingType keyValueEncodingType) throws Exception {
         final String tenant = PUBLIC_TENANT;
         final String namespace = "test-namespace-" + randomName(16);
@@ -832,6 +830,7 @@ public class SchemaTest extends MockedPulsarServiceBaseTest {
                 .subscribe();
         consumer.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testDeleteTopicAndSchema() throws Exception {
@@ -892,102 +891,6 @@ public class SchemaTest extends MockedPulsarServiceBaseTest {
             } catch (BKException.BKNoSuchLedgerExistsException ignore) {
             }
         }
-    }
-
-    @Test
-    public void testDeleteTopicAndSchemaForV1() throws Exception {
-        final String tenant = PUBLIC_TENANT;
-        final String cluster = CLUSTER_NAME;
-        final String namespace = "test-namespace-" + randomName(16);
-        final String topicOne = "not-partitioned-topic";
-        final String topic2 = "persistent://" + tenant + "/" + cluster + "/" + namespace + "/partitioned-topic";
-
-        // persistent, non-partitioned v1/topic
-        final String topic1 = TopicName.get(
-                TopicDomain.persistent.value(),
-                tenant,
-                cluster,
-                namespace,
-                topicOne).toString();
-
-        // persistent, partitioned v1/topic
-        admin.topics().createPartitionedTopic(topic2, 1);
-
-        Producer<Schemas.PersonOne> p11 = pulsarClient.newProducer(Schema.JSON(Schemas.PersonOne.class))
-                .topic(topic1)
-                .create();
-
-        Producer<Schemas.PersonThree> p12 = pulsarClient.newProducer(Schema.JSON(Schemas.PersonThree.class))
-                .topic(topic1)
-                .create();
-
-        Producer<Schemas.PersonThree> p21 = pulsarClient.newProducer(Schema.JSON(Schemas.PersonThree.class))
-                .topic(topic2)
-                .create();
-
-        List<CompletableFuture<SchemaRegistry.SchemaAndMetadata>> schemaFutures1 =
-                this.getPulsar().getSchemaRegistryService().getAllSchemas(TopicName.get(topic1).getSchemaName()).get();
-        FutureUtil.waitForAll(schemaFutures1).get();
-        List<SchemaRegistry.SchemaAndMetadata> schemas1 = schemaFutures1.stream().map(future -> {
-            try {
-                return future.get();
-            } catch (Exception e) {
-                return null;
-            }
-        }).filter(Objects::nonNull).toList();
-        assertEquals(schemas1.size(), 2);
-        for (SchemaRegistry.SchemaAndMetadata schema : schemas1) {
-            assertNotNull(schema);
-        }
-
-        List<CompletableFuture<SchemaRegistry.SchemaAndMetadata>> schemaFutures2 =
-                this.getPulsar().getSchemaRegistryService().getAllSchemas(TopicName.get(topic2).getSchemaName()).get();
-        FutureUtil.waitForAll(schemaFutures2).get();
-        List<SchemaRegistry.SchemaAndMetadata> schemas2 = schemaFutures2.stream().map(future -> {
-            try {
-                return future.get();
-            } catch (Exception e) {
-                return null;
-            }
-        }).filter(Objects::nonNull).toList();
-        assertEquals(schemas2.size(), 1);
-        for (SchemaRegistry.SchemaAndMetadata schema : schemas2) {
-            assertNotNull(schema);
-        }
-
-        // not-force delete topic
-        try {
-            admin.topics().delete(topic1, false);
-            fail();
-        } catch (Exception e) {
-            assertThat(e.getMessage())
-                    .isNotNull()
-                    .startsWith("Topic has 2 clients");
-        }
-        assertEquals(this.getPulsar().getSchemaRegistryService()
-                .trimDeletedSchemaAndGetList(TopicName.get(topic1).getSchemaName()).get().size(), 2);
-        try {
-            admin.topics().deletePartitionedTopic(topic2, false);
-            fail();
-        } catch (Exception e) {
-            assertThat(e.getMessage())
-                    .isNotNull()
-                    .startsWith("Topic has 1 client");
-        }
-        assertEquals(this.getPulsar().getSchemaRegistryService()
-                .trimDeletedSchemaAndGetList(TopicName.get(topic2).getSchemaName()).get().size(), 1);
-
-        // Close producer to avoid reconnect.
-        p11.close();
-        p12.close();
-        p21.close();
-        // force and delete-schema when delete topic
-        admin.topics().delete(topic1, true);
-        assertEquals(this.getPulsar().getSchemaRegistryService()
-                .trimDeletedSchemaAndGetList(TopicName.get(topic1).getSchemaName()).get().size(), 0);
-        admin.topics().deletePartitionedTopic(topic2, true);
-        assertEquals(this.getPulsar().getSchemaRegistryService()
-                .trimDeletedSchemaAndGetList(TopicName.get(topic2).getSchemaName()).get().size(), 0);
     }
 
     @Test
@@ -1230,6 +1133,7 @@ public class SchemaTest extends MockedPulsarServiceBaseTest {
         return ns + "/" + baseTopic;
     }
 
+    @SuppressWarnings("unchecked")
     private void generateDataByDifferentSchema(String ns,
                                                String baseTopic,
                                                Schema schema,
@@ -1271,6 +1175,7 @@ public class SchemaTest extends MockedPulsarServiceBaseTest {
         consumer.close();
     }
 
+    @SuppressWarnings("unchecked")
     private void checkSchemaForAutoSchema(Message<GenericRecord> message) {
         if (!message.getReaderSchema().isPresent()) {
             Assert.fail("Failed to get reader schema for auto consume multiple schema topic.");
@@ -1516,17 +1421,19 @@ public class SchemaTest extends MockedPulsarServiceBaseTest {
         consumer.close();
 
         // (2) Delete schema ledger
-        MetadataCache<SchemaStorageFormat.SchemaLocator> locatorEntryCache = pulsar.getLocalMetadataStore()
-                .getMetadataCache(new MetadataSerde<SchemaStorageFormat.SchemaLocator>() {
+        MetadataCache<SchemaLocator> locatorEntryCache = pulsar.getLocalMetadataStore()
+                .getMetadataCache(new MetadataSerde<SchemaLocator>() {
                     @Override
-                    public byte[] serialize(String path, SchemaStorageFormat.SchemaLocator value) {
+                    public byte[] serialize(String path, SchemaLocator value) {
                         return value.toByteArray();
                     }
 
                     @Override
-                    public SchemaStorageFormat.SchemaLocator deserialize(String path, byte[] content, Stat stat)
+                    public SchemaLocator deserialize(String path, byte[] content, Stat stat)
                             throws IOException {
-                        return SchemaStorageFormat.SchemaLocator.parseFrom(content);
+                        SchemaLocator loc = new SchemaLocator();
+                        loc.parseFrom(content);
+                        return loc;
                     }
                 });
         String path = "/schemas/public/" + namespace + "/test-multi-version-schema-one";
@@ -1552,6 +1459,7 @@ public class SchemaTest extends MockedPulsarServiceBaseTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testPendingQueueSizeIfIncompatible() throws Exception {
         final String namespace = BrokerTestUtil.newUniqueName(PUBLIC_TENANT + "/ns");
         admin.namespaces().createNamespace(namespace, Sets.newHashSet(CLUSTER_NAME));

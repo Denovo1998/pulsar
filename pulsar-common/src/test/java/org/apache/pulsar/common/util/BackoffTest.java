@@ -22,35 +22,31 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
-import java.util.concurrent.TimeUnit;
 import org.mockito.Mockito;
 import org.testng.annotations.Test;
 
 public class BackoffTest {
     boolean withinTenPercentAndDecrementTimer(Backoff backoff, long t2) {
-        long t1 = backoff.next();
+        long t1 = backoff.next().toMillis();
         return (t1 >= t2 * 0.9 && t1 <= t2);
     }
 
     boolean checkExactAndDecrementTimer(Backoff backoff, long t2) {
-        long t1 = backoff.next();
+        long t1 = backoff.next().toMillis();
         return t1 == t2;
-    }
-    @Test
-    public void shouldBackoffTest() {
-        // gives false
-        assertFalse(Backoff.shouldBackoff(0L, TimeUnit.NANOSECONDS, 0));
-        long currentTimestamp = System.nanoTime();
-        // gives true
-        assertTrue(Backoff.shouldBackoff(currentTimestamp, TimeUnit.NANOSECONDS, 100));
     }
 
     @Test
     public void mandatoryStopTestNegativeTest() {
-        Backoff backoff = new Backoff(100, TimeUnit.MILLISECONDS, 60, TimeUnit.SECONDS, 1900, TimeUnit.MILLISECONDS);
-        assertEquals(backoff.next(), 100);
+        Backoff backoff = Backoff.builder()
+                .initialDelay(Duration.ofMillis(100))
+                .maxBackoff(Duration.ofSeconds(60))
+                .mandatoryStop(Duration.ofMillis(1900))
+                .build();
+        assertEquals(backoff.next().toMillis(), 100);
         backoff.next(); // 200
         backoff.next(); // 400
         backoff.next(); // 800
@@ -60,48 +56,48 @@ public class BackoffTest {
     @Test
     public void firstBackoffTimerTest() {
         Clock mockClock = Mockito.mock(Clock.class);
-        Mockito.when(mockClock.millis())
-            .thenReturn(0L)
-            .thenReturn(300L);
+        Mockito.when(mockClock.instant())
+            .thenReturn(Instant.ofEpochMilli(0))
+            .thenReturn(Instant.ofEpochMilli(300));
 
-        Backoff backoff = new Backoff(
-            100, TimeUnit.MILLISECONDS,
-            60, TimeUnit.SECONDS,
-            1900, TimeUnit.MILLISECONDS,
-            mockClock
-        );
+        Backoff backoff = Backoff.builder()
+            .initialDelay(Duration.ofMillis(100))
+            .maxBackoff(Duration.ofSeconds(60))
+            .mandatoryStop(Duration.ofMillis(1900))
+            .clock(mockClock)
+            .build();
 
-        assertEquals(backoff.next(), 100);
+        assertEquals(backoff.next().toMillis(), 100);
 
-        long firstBackOffTime = backoff.getFirstBackoffTimeInMillis();
+        Instant firstBackOffTime = backoff.getFirstBackoffTime();
         backoff.reset();
-        assertEquals(backoff.next(), 100);
-        long diffBackOffTime = backoff.getFirstBackoffTimeInMillis() - firstBackOffTime;
+        assertEquals(backoff.next().toMillis(), 100);
+        long diffBackOffTime = Duration.between(firstBackOffTime, backoff.getFirstBackoffTime()).toMillis();
         assertEquals(diffBackOffTime, 300);
     }
 
     @Test
     public void mandatoryStopShouldWorkWithConstantBackoff() {
         Clock mockClock = Mockito.mock(Clock.class);
-        Mockito.when(mockClock.millis())
-                .thenReturn(0L)
-                .thenReturn(400L);
+        Mockito.when(mockClock.instant())
+                .thenReturn(Instant.ofEpochMilli(0))
+                .thenReturn(Instant.ofEpochMilli(400));
 
-        Backoff backoff = new Backoff(
-                100, TimeUnit.MILLISECONDS,
-                100, TimeUnit.MILLISECONDS,
-                300, TimeUnit.MILLISECONDS,
-                mockClock
-        );
+        Backoff backoff = Backoff.builder()
+                .initialDelay(Duration.ofMillis(100))
+                .maxBackoff(Duration.ofMillis(100))
+                .mandatoryStop(Duration.ofMillis(300))
+                .clock(mockClock)
+                .build();
 
         // first call starts the mandatory-stop timer
         backoff.next();
-        long firstBackoffTime = backoff.getFirstBackoffTimeInMillis();
+        Instant firstBackoffTime = backoff.getFirstBackoffTime();
 
         // elapsed wall-clock time should exceed mandatory stop
         backoff.next();
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), firstBackoffTime,
-                "firstBackoffTimeInMillis should not be updated after the first call to next()");
+        assertEquals(backoff.getFirstBackoffTime(), firstBackoffTime,
+                "firstBackoffTime should not be updated after the first call to next()");
         assertTrue(backoff.isMandatoryStopMade(),
                 "mandatory stop should be reached even when initial == max (constant backoff)");
     }
@@ -109,27 +105,27 @@ public class BackoffTest {
     @Test
     public void reduceToHalfShouldNotResetMandatoryStopTimer() {
         Clock mockClock = Mockito.mock(Clock.class);
-        Mockito.when(mockClock.millis())
-                .thenReturn(0L)
-                .thenReturn(200L);
+        Mockito.when(mockClock.instant())
+                .thenReturn(Instant.ofEpochMilli(0))
+                .thenReturn(Instant.ofEpochMilli(200));
 
-        Backoff backoff = new Backoff(
-                100, TimeUnit.MILLISECONDS,
-                400, TimeUnit.MILLISECONDS,
-                250, TimeUnit.MILLISECONDS,
-                mockClock
-        );
+        Backoff backoff = Backoff.builder()
+                .initialDelay(Duration.ofMillis(100))
+                .maxBackoff(Duration.ofMillis(400))
+                .mandatoryStop(Duration.ofMillis(250))
+                .clock(mockClock)
+                .build();
 
         // first call starts the mandatory-stop timer (next becomes 200)
         backoff.next();
-        long firstBackoffTime = backoff.getFirstBackoffTimeInMillis();
+        Instant firstBackoffTime = backoff.getFirstBackoffTime();
 
-        // This can bring the next delay back to initial, but it should not reset firstBackoffTimeInMillis.
+        // This can bring the next delay back to initial, but it should not reset firstBackoffTime.
         backoff.reduceToHalf();
 
         backoff.next();
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), firstBackoffTime,
-                "reduceToHalf should not reset firstBackoffTimeInMillis");
+        assertEquals(backoff.getFirstBackoffTime(), firstBackoffTime,
+                "reduceToHalf should not reset firstBackoffTime");
         assertTrue(backoff.isMandatoryStopMade(),
                 "mandatory stop should be reached based on wall-clock time since the first call to next()");
     }
@@ -137,35 +133,37 @@ public class BackoffTest {
     @Test
     public void resetShouldStartNewMandatoryStopCycle() {
         Clock mockClock = Mockito.mock(Clock.class);
-        Mockito.when(mockClock.millis())
-                .thenReturn(0L)
-                .thenReturn(400L)
-                .thenReturn(1000L)
-                .thenReturn(1400L);
+        Mockito.when(mockClock.instant())
+                .thenReturn(Instant.ofEpochMilli(0))
+                .thenReturn(Instant.ofEpochMilli(400))
+                .thenReturn(Instant.ofEpochMilli(1000))
+                .thenReturn(Instant.ofEpochMilli(1400));
 
-        Backoff backoff = new Backoff(
-                100, TimeUnit.MILLISECONDS,
-                100, TimeUnit.MILLISECONDS,
-                300, TimeUnit.MILLISECONDS,
-                mockClock
-        );
+        Backoff backoff = Backoff.builder()
+                .initialDelay(Duration.ofMillis(100))
+                .maxBackoff(Duration.ofMillis(100))
+                .mandatoryStop(Duration.ofMillis(300))
+                .clock(mockClock)
+                .build();
 
         // Cycle 1: reach mandatory stop
         backoff.next();
-        long firstCycleStart = backoff.getFirstBackoffTimeInMillis();
+        Instant firstCycleStart = backoff.getFirstBackoffTime();
         backoff.next();
         assertTrue(backoff.isMandatoryStopMade(), "mandatory stop should be reached in cycle-1");
 
         // Reset should clear mandatory-stop state so a new cycle can start.
         backoff.reset();
         assertFalse(backoff.isMandatoryStopMade(), "reset should clear mandatoryStopMade");
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), 0, "reset should clear firstBackoffTimeInMillis");
+        assertEquals(backoff.getFirstBackoffTime(), Instant.EPOCH, "reset should clear firstBackoffTime");
 
         // Cycle 2: should start timing again and be able to reach mandatory stop again.
         backoff.next();
-        long secondCycleStart = backoff.getFirstBackoffTimeInMillis();
-        assertEquals(secondCycleStart, 1000, "reset should start a new mandatory-stop timing window");
-        assertEquals(secondCycleStart - firstCycleStart, 1000, "reset should not reuse the old timing window");
+        Instant secondCycleStart = backoff.getFirstBackoffTime();
+        assertEquals(secondCycleStart, Instant.ofEpochMilli(1000),
+                "reset should start a new mandatory-stop timing window");
+        assertEquals(Duration.between(firstCycleStart, secondCycleStart).toMillis(), 1000,
+                "reset should not reuse the old timing window");
 
         backoff.next();
         assertTrue(backoff.isMandatoryStopMade(), "mandatory stop should be reached in cycle-2");
@@ -174,7 +172,12 @@ public class BackoffTest {
     @Test
     public void basicTest() {
         Clock mockClock = Clock.fixed(Instant.EPOCH, ZoneId.systemDefault());
-        Backoff backoff = new Backoff(5, TimeUnit.MILLISECONDS, 60, TimeUnit.SECONDS, 60, TimeUnit.SECONDS, mockClock);
+        Backoff backoff = Backoff.builder()
+                .initialDelay(Duration.ofMillis(5))
+                .maxBackoff(Duration.ofSeconds(60))
+                .mandatoryStop(Duration.ofSeconds(60))
+                .clock(mockClock)
+                .build();
         assertTrue(checkExactAndDecrementTimer(backoff, 5));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 10));
         backoff.reset();
@@ -184,18 +187,18 @@ public class BackoffTest {
     @Test
     public void maxTest() {
         Clock mockClock = Mockito.mock(Clock.class);
-        Mockito.when(mockClock.millis())
-            .thenReturn(0L)
-            .thenReturn(10L)
-            .thenReturn(20L)
-            .thenReturn(40L);
+        Mockito.when(mockClock.instant())
+            .thenReturn(Instant.ofEpochMilli(0))
+            .thenReturn(Instant.ofEpochMilli(10))
+            .thenReturn(Instant.ofEpochMilli(20))
+            .thenReturn(Instant.ofEpochMilli(40));
 
-        Backoff backoff = new Backoff(
-            5, TimeUnit.MILLISECONDS,
-            20, TimeUnit.MILLISECONDS,
-            20, TimeUnit.MILLISECONDS,
-            mockClock
-        );
+        Backoff backoff = Backoff.builder()
+            .initialDelay(Duration.ofMillis(5))
+            .maxBackoff(Duration.ofMillis(20))
+            .mandatoryStop(Duration.ofMillis(20))
+            .clock(mockClock)
+            .build();
 
         assertTrue(checkExactAndDecrementTimer(backoff, 5));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 10));
@@ -207,73 +210,73 @@ public class BackoffTest {
     public void mandatoryStopTest() {
         Clock mockClock = Mockito.mock(Clock.class);
 
-        Backoff backoff = new Backoff(
-            100, TimeUnit.MILLISECONDS,
-            60, TimeUnit.SECONDS,
-            1900, TimeUnit.MILLISECONDS,
-            mockClock
-        );
+        Backoff backoff = Backoff.builder()
+            .initialDelay(Duration.ofMillis(100))
+            .maxBackoff(Duration.ofSeconds(60))
+            .mandatoryStop(Duration.ofMillis(1900))
+            .clock(mockClock)
+            .build();
 
-        Mockito.when(mockClock.millis()).thenReturn(0L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(0));
         assertTrue(checkExactAndDecrementTimer(backoff, 100));
-        Mockito.when(mockClock.millis()).thenReturn(100L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(100));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 200));
-        Mockito.when(mockClock.millis()).thenReturn(300L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(300));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 400));
-        Mockito.when(mockClock.millis()).thenReturn(700L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(700));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 800));
-        Mockito.when(mockClock.millis()).thenReturn(1500L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(1500));
 
         // would have been 1600 w/o the mandatory stop
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 400));
         assertTrue(backoff.isMandatoryStopMade());
-        Mockito.when(mockClock.millis()).thenReturn(1900L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(1900));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 3200));
-        Mockito.when(mockClock.millis()).thenReturn(3200L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(3200));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 6400));
-        Mockito.when(mockClock.millis()).thenReturn(3200L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(3200));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 12800));
-        Mockito.when(mockClock.millis()).thenReturn(6400L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(6400));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 25600));
-        Mockito.when(mockClock.millis()).thenReturn(12800L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(12800));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 51200));
-        Mockito.when(mockClock.millis()).thenReturn(25600L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(25600));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 60000));
-        Mockito.when(mockClock.millis()).thenReturn(51200L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(51200));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 60000));
-        Mockito.when(mockClock.millis()).thenReturn(60000L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(60000));
 
         backoff.reset();
-        Mockito.when(mockClock.millis()).thenReturn(0L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(0));
         assertTrue(checkExactAndDecrementTimer(backoff, 100));
-        Mockito.when(mockClock.millis()).thenReturn(100L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(100));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 200));
-        Mockito.when(mockClock.millis()).thenReturn(300L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(300));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 400));
-        Mockito.when(mockClock.millis()).thenReturn(700L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(700));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 800));
-        Mockito.when(mockClock.millis()).thenReturn(1500L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(1500));
         // would have been 1600 w/o the mandatory stop
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 400));
 
         backoff.reset();
-        Mockito.when(mockClock.millis()).thenReturn(0L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(0));
         assertTrue(checkExactAndDecrementTimer(backoff, 100));
-        Mockito.when(mockClock.millis()).thenReturn(100L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(100));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 200));
-        Mockito.when(mockClock.millis()).thenReturn(300L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(300));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 400));
-        Mockito.when(mockClock.millis()).thenReturn(700L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(700));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 800));
 
         backoff.reset();
-        Mockito.when(mockClock.millis()).thenReturn(0L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(0));
         assertTrue(checkExactAndDecrementTimer(backoff, 100));
-        Mockito.when(mockClock.millis()).thenReturn(100L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(100));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 200));
-        Mockito.when(mockClock.millis()).thenReturn(300L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(300));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 400));
-        Mockito.when(mockClock.millis()).thenReturn(700L);
+        Mockito.when(mockClock.instant()).thenReturn(Instant.ofEpochMilli(700));
         assertTrue(withinTenPercentAndDecrementTimer(backoff, 800));
     }
 

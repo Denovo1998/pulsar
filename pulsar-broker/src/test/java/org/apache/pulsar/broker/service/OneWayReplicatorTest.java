@@ -116,6 +116,7 @@ import org.apache.pulsar.common.policies.data.impl.AutoTopicCreationOverrideImpl
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.schema.SchemaType;
 import org.apache.pulsar.common.util.FutureUtil;
+import org.apache.pulsar.metadata.impl.DualMetadataStore;
 import org.awaitility.Awaitility;
 import org.awaitility.reflect.WhiteboxImpl;
 import org.glassfish.jersey.client.JerseyClient;
@@ -473,6 +474,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
     }
 
     @Test(timeOut = 45 * 1000)
+    @SuppressWarnings("unchecked")
     public void testTopicCloseWhenInternalProducerCloseErrorOnce() throws Exception {
         final String topicName = BrokerTestUtil.newUniqueName("persistent://" + replicatedNamespace + "/tp_");
         admin1.topics().createNonPartitionedTopic(topicName);
@@ -485,7 +487,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         // Mock an error when calling "replicator.disconnect()"
         AtomicBoolean closeFailed = new AtomicBoolean(true);
         final ProducerImpl mockProducer = Mockito.mock(ProducerImpl.class);
-        final AtomicReference<ProducerImpl> originalProducer1 = new AtomicReference();
+        final AtomicReference<ProducerImpl<?>> originalProducer1 = new AtomicReference<>();
         doAnswer(invocation -> {
             if (closeFailed.get()) {
                 return CompletableFuture.failedFuture(new Exception("mocked ex"));
@@ -500,8 +502,8 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         // Verify: After "replicator.producer.closeAsync()" retry again, the "replicator.producer" will be closed
         // successful.
         closeFailed.set(false);
-        AtomicReference<PersistentTopic> topic2 = new AtomicReference();
-        AtomicReference<PersistentReplicator> replicator2 = new AtomicReference();
+        AtomicReference<PersistentTopic> topic2 = new AtomicReference<>();
+        AtomicReference<PersistentReplicator> replicator2 = new AtomicReference<>();
         Awaitility.await().untilAsserted(() -> {
             topic2.set((PersistentTopic) pulsar1.getBrokerService().getTopic(topicName, false).join().get());
             replicator2.set((PersistentReplicator) topic2.get().getReplicators().values().iterator().next());
@@ -523,6 +525,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         });
     }
 
+    @SuppressWarnings("unchecked")
     private Runnable injectMockReplicatorProducerBuilder(
                                 BiFunction<ProducerConfigurationData, ProducerImpl, ProducerImpl> producerDecorator)
             throws Exception {
@@ -547,9 +550,9 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
 
         // Inject producer decorator.
         doAnswer(invocation -> {
-            Schema schema = (Schema) invocation.getArguments()[0];
+            Schema<?> schema = (Schema) invocation.getArguments()[0];
             ProducerBuilderImpl<?> producerBuilder = (ProducerBuilderImpl) internalClient.newProducer(schema);
-            ProducerBuilder spyProducerBuilder = spy(producerBuilder);
+            ProducerBuilder<?> spyProducerBuilder = spy(producerBuilder);
             doAnswer(ignore -> {
                 CompletableFuture<Producer> producerFuture = new CompletableFuture<>();
                 producerBuilder.createAsync().whenComplete((p, t) -> {
@@ -882,7 +885,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         });
 
         // 2.Enable namespace level replication.
-        admin1.namespaces().setNamespaceReplicationClusters(namespaceName, Sets.newHashSet(cluster1, cluster2));
+        admin1.namespaces().setNamespaceReplicationClusters(namespaceName, Sets.newHashSet(cluster1, cluster2), true);
         AtomicReference<PersistentReplicator> replicator = new AtomicReference<PersistentReplicator>();
         Awaitility.await().untilAsserted(() -> {
             assertFalse(persistentTopic.getReplicators().isEmpty());
@@ -934,7 +937,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
             admin1.topics().delete(topicName);
             admin2.topics().delete(topicName);
         });
-        admin1.namespaces().setNamespaceReplicationClusters(namespaceName, Sets.newHashSet(cluster1));
+        admin1.namespaces().setNamespaceReplicationClusters(namespaceName, Sets.newHashSet(cluster1), true);
         admin1.namespaces().deleteNamespace(namespaceName);
         admin2.namespaces().deleteNamespace(namespaceName);
     }
@@ -1133,6 +1136,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
     }
 
     @Test(dataProvider = "replicationLevels")
+    @SuppressWarnings("unchecked")
     public void testReloadWithTopicLevelGeoReplication(ReplicationLevel replicationLevel) throws Exception {
         final String topicName = ((Supplier<String>) () -> {
             if (replicationLevel.equals(ReplicationLevel.TOPIC_LEVEL)) {
@@ -1314,9 +1318,9 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
 
         // cleanup.
         // There is no good way to delete topics when using global ZK, skip cleanup.
-        admin1.namespaces().setNamespaceReplicationClusters(ns1, Collections.singleton(cluster1));
+        admin1.namespaces().setNamespaceReplicationClusters(ns1, Collections.singleton(cluster1), true);
         admin1.namespaces().unload(ns1);
-        admin2.namespaces().setNamespaceReplicationClusters(ns1, Collections.singleton(cluster2));
+        admin2.namespaces().setNamespaceReplicationClusters(ns1, Collections.singleton(cluster2), true);
         admin2.namespaces().unload(ns1);
         admin1.topics().delete(topic1, false);
         admin2.topics().delete(topic1, false);
@@ -1344,6 +1348,9 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         String ns = defaultTenant + "/" + UUID.randomUUID().toString().replace("-", "");
         admin1.namespaces().createNamespace(ns);
         admin2.namespaces().createNamespace(ns);
+        String topicUsedToTriggerSystemTopic = BrokerTestUtil.newUniqueName("persistent://" + ns + "/tp_");
+        admin2.topics().createNonPartitionedTopic(topicUsedToTriggerSystemTopic);
+        admin2.topics().delete(topicUsedToTriggerSystemTopic, false);
 
         // Set topic auto-creation rule.
         // c1: no-partitioned topic
@@ -1354,18 +1361,17 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         admin2.namespaces().setAutoTopicCreation(ns, autoTopicCreation);
         Awaitility.await().untilAsserted(() -> {
             assertEquals(admin2.namespaces().getAutoTopicCreationAsync(ns).join().getDefaultNumPartitions(), 2);
-            // Trigger system topic __change_event's initialize.
-            pulsar2.getTopicPoliciesService().getTopicPoliciesAsync(TopicName.get("persistent://" + ns + "/1"),
-                    TopicPoliciesService.GetType.LOCAL_ONLY);
         });
 
         // Create non-partitioned topic.
         // Enable replication.
         final String tp = BrokerTestUtil.newUniqueName("persistent://" + ns + "/tp_");
         admin1.topics().createNonPartitionedTopic(tp);
-        admin1.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)));
+        admin1.namespaces().setNamespaceReplicationClusters(ns,
+                new HashSet<>(Arrays.asList(cluster1, cluster2)), false);
         if (replicationMode.equals(ReplicationMode.DoubleWay)) {
-            admin2.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)));
+            admin2.namespaces().setNamespaceReplicationClusters(ns,
+                    new HashSet<>(Arrays.asList(cluster1, cluster2)), false);
         }
 
         // Trigger and wait for replicator starts.
@@ -1396,9 +1402,9 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         });
 
         // cleanup.
-        admin1.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1)));
+        admin1.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1)), true);
         if (replicationMode.equals(ReplicationMode.DoubleWay)) {
-            admin2.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster2)));
+            admin2.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster2)), true);
         }
         Awaitility.await().untilAsserted(() -> {
             PersistentTopic persistentTopic = (PersistentTopic) broker1.getTopic(tp, false).join().get();
@@ -1534,6 +1540,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
      * This test used to confirm the "start replicator retry task" will be skipped after the topic is closed.
      */
     @Test
+    @SuppressWarnings("unchecked")
     public void testCloseTopicAfterStartReplicationFailed() throws Exception {
         Field fieldTopicNameCache = TopicName.class.getDeclaredField("cache");
         fieldTopicNameCache.setAccessible(true);
@@ -1547,8 +1554,9 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
                 (PersistentTopic) pulsar1.getBrokerService().getTopic(topicName, false).join().get();
 
         // We inject an error to make "start replicator" to fail.
+        DualMetadataStore dms = (DualMetadataStore) pulsar1.getConfigurationMetadataStore();
         AsyncLoadingCache<String, Boolean> existsCache =
-                WhiteboxImpl.getInternalState(pulsar1.getConfigurationMetadataStore(), "existsCache");
+                WhiteboxImpl.getInternalState(dms.getSourceStore(), "existsCache");
         String path = "/admin/partitioned-topics/" + TopicName.get(topicName).getPersistenceNamingEncoding();
         existsCache.put(path, CompletableFuture.completedFuture(true));
 
@@ -1689,8 +1697,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         producer1.close();
         assertTrue(pulsar2.getPulsarResources().getTopicResources().persistentTopicExists(topicNameObj).join());
         admin1.topics().createSubscription(topicName, subscriptionName, MessageId.earliest);
-        admin1.topics().createSubscription(subscriptionName, topicName, MessageId.earliest);
-        admin2.topics().createSubscription(subscriptionName, topicName, MessageId.earliest);
+        admin2.topics().createSubscription(topicName, subscriptionName, MessageId.earliest);
 
         // Case 1: Global topic level policies -> Add: replicate.
         PublishRate publishRateAddGlobal = new PublishRate(100, 10000);
@@ -1921,8 +1928,7 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         } else {
             admin1.topics().createNonPartitionedTopic(tp);
         }
-
-        admin1.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)));
+        admin1.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)), true);
 
         Awaitility.await().untilAsserted(() -> {
             PersistentTopic persistentTopic =
@@ -1964,8 +1970,10 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         admin1.topics().createPartitionedTopic(tp, 4);
         admin2.topics().createNonPartitionedTopic(tp);
 
-        admin1.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)));
-        admin2.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)));
+        admin1.namespaces().setNamespaceReplicationClusters(ns,
+                new HashSet<>(Arrays.asList(cluster1, cluster2)), false);
+        admin2.namespaces().setNamespaceReplicationClusters(ns,
+                new HashSet<>(Arrays.asList(cluster1, cluster2)), false);
 
         Awaitility.await().untilAsserted(() -> {
             PersistentTopic persistentTopic =
@@ -2034,8 +2042,10 @@ public class OneWayReplicatorTest extends OneWayReplicatorTestBase {
         admin1.topics().createPartitionedTopic(tp, 4);
         admin2.topics().createPartitionedTopic(tp, 8);
 
-        admin1.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)));
-        admin2.namespaces().setNamespaceReplicationClusters(ns, new HashSet<>(Arrays.asList(cluster1, cluster2)));
+        admin1.namespaces().setNamespaceReplicationClusters(ns,
+                new HashSet<>(Arrays.asList(cluster1, cluster2)), false);
+        admin2.namespaces().setNamespaceReplicationClusters(ns,
+                new HashSet<>(Arrays.asList(cluster1, cluster2)), false);
 
         Awaitility.await().untilAsserted(() -> {
             PersistentTopic persistentTopic =

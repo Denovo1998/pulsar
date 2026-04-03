@@ -123,6 +123,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
         super.internalCleanup();
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testSplitAndOwnBundles() throws Exception {
 
@@ -133,8 +134,8 @@ public class NamespaceServiceTest extends BrokerTestBase {
         ownership.setAccessible(true);
         ownership.set(pulsar.getNamespaceService(), mockOwnershipCache);
         NamespaceService namespaceService = pulsar.getNamespaceService();
-        NamespaceName nsname = NamespaceName.get("pulsar/global/ns1");
-        TopicName topicName = TopicName.get("persistent://pulsar/global/ns1/topic-1");
+        NamespaceName nsname = NamespaceName.get("prop/ns-abc");
+        TopicName topicName = TopicName.get("persistent://prop/ns-abc/topic-1");
         NamespaceBundles bundles = namespaceService.getNamespaceBundleFactory().getBundles(nsname);
         NamespaceBundle originalBundle = bundles.findBundle(topicName);
 
@@ -194,6 +195,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testSplitMapWithRefreshedStatMap() throws Exception {
 
@@ -210,8 +212,8 @@ public class NamespaceServiceTest extends BrokerTestBase {
         ownership.set(pulsar.getNamespaceService(), mockOwnershipCache);
 
         NamespaceService namespaceService = pulsar.getNamespaceService();
-        NamespaceName nsname = NamespaceName.get("pulsar/global/ns1");
-        TopicName topicName = TopicName.get("persistent://pulsar/global/ns1/topic-1");
+        NamespaceName nsname = NamespaceName.get("prop/ns-abc");
+        TopicName topicName = TopicName.get("persistent://prop/ns-abc/topic-1");
         NamespaceBundles bundles = namespaceService.getNamespaceBundleFactory().getBundles(nsname);
         NamespaceBundle originalBundle = bundles.findBundle(topicName);
 
@@ -250,6 +252,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testIsServiceUnitDisabled() throws Exception {
 
@@ -265,8 +268,8 @@ public class NamespaceServiceTest extends BrokerTestBase {
         ownership.set(pulsar.getNamespaceService(), mockOwnershipCache);
 
         NamespaceService namespaceService = pulsar.getNamespaceService();
-        NamespaceName nsname = NamespaceName.get("pulsar/global/ns1");
-        TopicName topicName = TopicName.get("persistent://pulsar/global/ns1/topic-1");
+        NamespaceName nsname = NamespaceName.get("pulsar/ns1");
+        TopicName topicName = TopicName.get("persistent://pulsar/ns1/topic-1");
         NamespaceBundles bundles = namespaceService.getNamespaceBundleFactory().getBundles(nsname);
         NamespaceBundle originalBundle = bundles.findBundle(topicName);
 
@@ -274,6 +277,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testRemoveOwnershipNamespaceBundle() throws Exception {
 
@@ -289,7 +293,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
         ownership.set(pulsar.getNamespaceService(), ownershipCache);
 
         NamespaceService namespaceService = pulsar.getNamespaceService();
-        NamespaceName nsname = NamespaceName.get("prop/use/ns1");
+        NamespaceName nsname = NamespaceName.get("prop/ns1");
         NamespaceBundles bundles = namespaceService.getNamespaceBundleFactory().getBundles(nsname);
 
         NamespaceBundle bundle = bundles.getBundles().get(0);
@@ -302,7 +306,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
     @Test
     public void testUnloadNamespaceBundleFailure() throws Exception {
 
-        final String topicName = "persistent://my-property/use/my-ns/my-topic1";
+        final String topicName = "persistent://prop/ns-abc/my-topic1";
         pulsarClient.newConsumer().topic(topicName).subscriptionName("my-subscriber-name").subscribe();
 
         final var topics = pulsar.getBrokerService().getTopics();
@@ -332,7 +336,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
     @Test(timeOut = 6000)
     public void testUnloadNamespaceBundleWithStuckTopic() throws Exception {
 
-        final String topicName = "persistent://my-property/use/my-ns/my-topic1";
+        final String topicName = "persistent://prop/ns-abc/my-topic1";
         Consumer<byte[]> consumer = pulsarClient.newConsumer().topic(topicName).subscriptionName("my-subscriber-name")
                 .subscribe();
         final var topics = pulsar.getBrokerService().getTopics();
@@ -428,6 +432,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
         System.out.println(withListener);
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testCreateNamespaceWithDefaultNumberOfBundles() throws Exception {
         OwnershipCache mockOwnershipCache = spy(pulsar.getNamespaceService().getOwnershipCache());
@@ -437,8 +442,8 @@ public class NamespaceServiceTest extends BrokerTestBase {
         ownership.setAccessible(true);
         ownership.set(pulsar.getNamespaceService(), mockOwnershipCache);
         NamespaceService namespaceService = pulsar.getNamespaceService();
-        NamespaceName nsname = NamespaceName.get("pulsar/global/ns1");
-        TopicName topicName = TopicName.get("persistent://pulsar/global/ns1/topic-1");
+        NamespaceName nsname = NamespaceName.get("pulsar/ns1");
+        TopicName topicName = TopicName.get("persistent://pulsar/ns1/topic-1");
         NamespaceBundles bundles = namespaceService.getNamespaceBundleFactory().getBundles(nsname);
         NamespaceBundle originalBundle = bundles.findBundle(topicName);
 
@@ -491,6 +496,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testRemoveOwnershipAndSplitBundle() throws Exception {
         OwnershipCache ownershipCache = spy(pulsar.getNamespaceService().getOwnershipCache());
@@ -502,8 +508,8 @@ public class NamespaceServiceTest extends BrokerTestBase {
         ownership.set(pulsar.getNamespaceService(), ownershipCache);
 
         NamespaceService namespaceService = pulsar.getNamespaceService();
-        NamespaceName nsname = NamespaceName.get("pulsar/global/ns1");
-        TopicName topicName = TopicName.get("persistent://pulsar/global/ns1/topic-1");
+        NamespaceName nsname = NamespaceName.get("pulsar/ns1");
+        TopicName topicName = TopicName.get("persistent://pulsar/ns1/topic-1");
         NamespaceBundles bundles = namespaceService.getNamespaceBundleFactory().getBundles(nsname);
         NamespaceBundle originalBundle = bundles.findBundle(topicName);
 
@@ -538,6 +544,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
     }
 
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testSplitBundleAndRemoveOldBundleFromOwnerShipCache() throws Exception {
         OwnershipCache ownershipCache = spy(pulsar.getNamespaceService().getOwnershipCache());
@@ -549,8 +556,8 @@ public class NamespaceServiceTest extends BrokerTestBase {
         ownership.set(pulsar.getNamespaceService(), ownershipCache);
 
         NamespaceService namespaceService = pulsar.getNamespaceService();
-        NamespaceName nsname = NamespaceName.get("pulsar/global/ns1");
-        TopicName topicName = TopicName.get("persistent://pulsar/global/ns1/topic-1");
+        NamespaceName nsname = NamespaceName.get("pulsar/ns1");
+        TopicName topicName = TopicName.get("persistent://pulsar/ns1/topic-1");
         NamespaceBundles bundles = namespaceService.getNamespaceBundleFactory().getBundles(nsname);
 
         NamespaceBundle splitBundle1 = bundles.findBundle(topicName);
@@ -583,8 +590,9 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testSplitLargestBundle() throws Exception {
-        String namespace = "prop/test/ns-abc2";
+        String namespace = "prop/ns-abc2";
         String topic = "persistent://" + namespace + "/t1-";
         int totalTopics = 100;
 
@@ -632,7 +640,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
     public void testSplitBUndleWithNoBundle() throws  Exception {
         conf.setLoadManagerClassName(ModularLoadManagerImpl.class.getName());
         restartBroker();
-        String namespace = "prop/test/ns-abc2";
+        String namespace = "prop/ns-abc2";
 
         BundlesData bundleData = BundlesData.builder().numBundles(10).build();
         admin.namespaces().createNamespace(namespace, bundleData);
@@ -655,11 +663,12 @@ public class NamespaceServiceTest extends BrokerTestBase {
      * @throws Exception
      */
     @Test
+    @SuppressWarnings("unchecked")
     public void testSplitBundleWithHighestThroughput() throws Exception {
 
         conf.setLoadManagerClassName(ModularLoadManagerImpl.class.getName());
         restartBroker();
-        String namespace = "prop/test/ns-abc2";
+        String namespace = "prop/ns-abc2";
         String topic = "persistent://" + namespace + "/t1-";
         int totalTopics = 100;
 
@@ -721,7 +730,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
     @Test
     public void testModularLoadManagerRemoveInactiveBundleFromLoadData() throws Exception {
-        final String namespace = "pulsar/test/ns1";
+        final String namespace = "prop/ns-abc";
         final String topic1 = "persistent://" + namespace + "/topic1";
         final String topic2 = "persistent://" + namespace + "/topic2";
 
@@ -912,7 +921,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
 
         // SUCCESS
         // 2.1.1. Set replication clusters without allowed clusters at namespace level.
-        namespaces.setNamespaceReplicationClusters(namespace, replicationClusters);
+        namespaces.setNamespaceReplicationClusters(namespace, replicationClusters, false);
         // 2..1.2 Set allowed clusters.
         namespaces.setNamespaceAllowedClusters(namespace, allowedClusters);
         // 2.1.3. Get allowed clusters and replication clusters.
@@ -933,7 +942,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
         // 2.1.5. Fail: Set replication clusters whose scope is excel the allowed clusters.
         Set<String> replicationClustersExcel = Set.of("r1", "r4");
         try {
-            namespaces.setNamespaceReplicationClusters(namespace, replicationClustersExcel);
+            namespaces.setNamespaceReplicationClusters(namespace, replicationClustersExcel, false);
             fail();
             //Todo: The status code in the old implementation is confused.
         } catch (PulsarAdminException ignore) {
@@ -952,7 +961,7 @@ public class NamespaceServiceTest extends BrokerTestBase {
         } catch (PulsarAdminException.ConflictException ignore) {}
 
         // CleanUp: Namespace with replication clusters can not be deleted by force.
-        namespaces.setNamespaceReplicationClusters(namespace, Set.of(conf.getClusterName()));
+        namespaces.setNamespaceReplicationClusters(namespace, Set.of(conf.getClusterName()), false);
         namespaces.setNamespaceAllowedClusters(namespace, Set.of(conf.getClusterName()));
         admin.namespaces().deleteNamespace(namespace, true);
         admin.tenants().deleteTenant(tenant, true);

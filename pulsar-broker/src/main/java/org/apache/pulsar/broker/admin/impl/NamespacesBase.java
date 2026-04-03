@@ -56,6 +56,7 @@ import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.mutable.MutableObject;
 import org.apache.pulsar.broker.PulsarServerException;
+import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.admin.AdminResource;
 import org.apache.pulsar.broker.loadbalance.LeaderBroker;
 import org.apache.pulsar.broker.loadbalance.extensions.ExtensibleLoadManagerImpl;
@@ -82,6 +83,7 @@ import org.apache.pulsar.common.naming.NamespaceBundles;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.SystemTopicNames;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
 import org.apache.pulsar.common.policies.data.AuthAction;
 import org.apache.pulsar.common.policies.data.AutoSubscriptionCreationOverride;
 import org.apache.pulsar.common.policies.data.AutoTopicCreationOverride;
@@ -466,27 +468,14 @@ public abstract class NamespacesBase extends AdminResource {
                                 throw new RestException(Status.METHOD_NOT_ALLOWED,
                                         "Broker doesn't allow forced deletion of namespaces");
                             }
-                            // ensure that non-global namespace is directed to the correct cluster
-                            if (!nsName.isGlobal()) {
-                                return validateClusterOwnershipAsync(nsName.getCluster());
-                            } else {
-                                return CompletableFuture.completedFuture(null);
-                            }
+                            return CompletableFuture.completedFuture(null);
                         })
                         .thenCompose(__ -> namespaceResources().getPoliciesAsync(nsName))
                         .thenCompose(policiesOpt -> {
                             if (policiesOpt.isEmpty()) {
                                 throw new RestException(Status.NOT_FOUND, "Namespace " + nsName + " does not exist.");
                             }
-                            if (!nsName.isGlobal()) {
-                                return CompletableFuture.completedFuture(null);
-                            }
                             Policies policies = policiesOpt.get();
-                            // Just keep the behavior of V1 namespace being the same as before.
-                            if (!nsName.isV2() && policies.replication_clusters.isEmpty()
-                                    && policies.allowed_clusters.isEmpty()) {
-                                return CompletableFuture.completedFuture(policies);
-                            }
                             String cluster = policies.getClusterThatCanDeleteNamespace();
                             if (cluster == null) {
                                 // There are still more than one clusters configured for the global namespace
@@ -560,63 +549,51 @@ public abstract class NamespacesBase extends AdminResource {
                 clientAppId(), namespaceName, bundleRange, authoritative, force);
         return validateNamespaceOperationAsync(namespaceName, NamespaceOperation.DELETE_BUNDLE)
                 .thenCompose(__ -> validatePoliciesReadOnlyAccessAsync())
-                .thenCompose(__ -> {
-                    if (!namespaceName.isGlobal()) {
-                        return validateClusterOwnershipAsync(namespaceName.getCluster());
-                    }
-                    return CompletableFuture.completedFuture(null);
-                })
                 .thenCompose(__ -> getNamespacePoliciesAsync(namespaceName))
                 .thenCompose(policies -> {
                     CompletableFuture<Void> future = CompletableFuture.completedFuture(null);
-                    if (namespaceName.isGlobal()) {
-                        // Just keep the behavior of V1 namespace being the same as before.
-                        if (!namespaceName.isV2() && policies.replication_clusters.isEmpty()
-                                && policies.allowed_clusters.isEmpty()) {
-                            return CompletableFuture.completedFuture(null);
-                        }
-                        String cluster = policies.getClusterThatCanDeleteNamespace();
-                        if (cluster == null) {
-                            // There are still more than one clusters configured for the global namespace
-                            throw new RestException(Status.PRECONDITION_FAILED, "Cannot delete the global namespace "
-                                    + namespaceName
-                                    + ". There are still more than one replication clusters configured.");
-                        }
-                        if (!cluster.equals(config().getClusterName())) { // No need to change.
-                            // the only replication cluster is other cluster, redirect
-                            future = clusterResources().getClusterAsync(cluster)
-                                    .thenCompose(clusterData -> {
-                                        if (clusterData.isEmpty()) {
-                                            throw new RestException(Status.NOT_FOUND,
-                                                    "Cluster " + cluster + " does not exist");
+                    String cluster = policies.getClusterThatCanDeleteNamespace();
+                    if (cluster == null) {
+                        // There are still more than one clusters configured for the global namespace
+                        throw new RestException(Status.PRECONDITION_FAILED, "Cannot delete the global namespace "
+                                + namespaceName
+                                + ". There are still more than one replication clusters configured.");
+                    }
+                    if (!cluster.equals(config().getClusterName())) {
+                        // the only replication cluster is other cluster, redirect
+                        future = clusterResources().getClusterAsync(cluster)
+                                .thenCompose(clusterData -> {
+                                    if (clusterData.isEmpty()) {
+                                        throw new RestException(Status.NOT_FOUND,
+                                                "Cluster " + cluster + " does not exist");
+                                    }
+                                    ClusterData replClusterData = clusterData.get();
+                                    URL replClusterUrl;
+                                    try {
+                                        if (!config().isTlsEnabled() || !isRequestHttps()) {
+                                            replClusterUrl = new URL(replClusterData.getServiceUrl());
+                                        } else if (StringUtils.isNotBlank(replClusterData.getServiceUrlTls())) {
+                                            replClusterUrl = new URL(replClusterData.getServiceUrlTls());
+                                        } else {
+                                            throw new RestException(Status.PRECONDITION_FAILED,
+                                                    "The replication cluster does not provide TLS encrypted "
+                                                            + "service");
                                         }
-                                        ClusterData replClusterData = clusterData.get();
-                                        URL replClusterUrl;
-                                        try {
-                                            if (!config().isTlsEnabled() || !isRequestHttps()) {
-                                                replClusterUrl = new URL(replClusterData.getServiceUrl());
-                                            } else if (StringUtils.isNotBlank(replClusterData.getServiceUrlTls())) {
-                                                replClusterUrl = new URL(replClusterData.getServiceUrlTls());
-                                            } else {
-                                                throw new RestException(Status.PRECONDITION_FAILED,
-                                                        "The replication cluster does not provide TLS encrypted "
-                                                                + "service");
-                                            }
-                                        } catch (MalformedURLException malformedURLException) {
-                                            throw new RestException(malformedURLException);
-                                        }
+                                    } catch (MalformedURLException malformedURLException) {
+                                        throw new RestException(malformedURLException);
+                                    }
 
-                                        URI redirect =
-                                                UriBuilder.fromUri(uri.getRequestUri()).host(replClusterUrl.getHost())
-                                                        .port(replClusterUrl.getPort())
-                                                        .replaceQueryParam("authoritative", false).build();
-                                        if (log.isDebugEnabled()) {
-                                            log.debug("[{}] Redirecting the rest call to {}: cluster={}",
-                                                    clientAppId(), redirect, cluster);
-                                        }
-                                        throw new WebApplicationException(Response.temporaryRedirect(redirect).build());
-                                    });
-                        }
+                                    URI redirect =
+                                            UriBuilder.fromUri(uri.getRequestUri()).host(replClusterUrl.getHost())
+                                                    .port(replClusterUrl.getPort())
+                                                    .replaceQueryParam("authoritative", false).build();
+                                    if (log.isDebugEnabled()) {
+                                        log.debug("[{}] Redirecting the rest call to {}: cluster={}",
+                                                clientAppId(), redirect, cluster);
+                                    }
+                                    throw new WebApplicationException(
+                                            Response.temporaryRedirect(redirect).build());
+                                });
                     }
                     return future
                             .thenCompose(__ ->
@@ -748,7 +725,8 @@ public abstract class NamespacesBase extends AdminResource {
     private CompletableFuture<Void> checkNamespace(Stream<String> namespaces) {
         boolean sameNamespace = namespaces.distinct().count() == 1;
         if (!sameNamespace) {
-            throw new RestException(Status.BAD_REQUEST, "The namespace should be the same");
+            return FutureUtil.failedFuture(
+                    new RestException(Status.BAD_REQUEST, "The namespace should be the same"));
         }
         return CompletableFuture.completedFuture(null);
     }
@@ -814,34 +792,20 @@ public abstract class NamespacesBase extends AdminResource {
      */
     protected CompletableFuture<Set<String>> internalGetNamespaceReplicationClustersAsync() {
         return validateNamespacePolicyOperationAsync(namespaceName, PolicyName.REPLICATION, PolicyOperation.READ)
-                .thenAccept(__ -> {
-                    if (!namespaceName.isGlobal()) {
-                        throw new RestException(Status.PRECONDITION_FAILED,
-                                "Cannot get the replication clusters for a non-global namespace");
-                    }
-                }).thenCompose(__ -> getNamespacePoliciesAsync(namespaceName))
+                .thenCompose(__ -> getNamespacePoliciesAsync(namespaceName))
                 .thenApply(policies -> policies.replication_clusters);
     }
 
     @SuppressWarnings("checkstyle:WhitespaceAfter")
-    protected CompletableFuture<Void> internalSetNamespaceReplicationClusters(List<String> clusterIds) {
+    protected CompletableFuture<Void> internalSetNamespaceReplicationClusters(List<String> clusterIds,
+                                                                              boolean compareTopicPartitions) {
         return validateNamespacePolicyOperationAsync(namespaceName, PolicyName.REPLICATION, PolicyOperation.WRITE)
                 .thenCompose(__ -> validatePoliciesReadOnlyAccessAsync())
                 .thenApply(__ -> {
                     if (CollectionUtils.isEmpty(clusterIds)) {
                         throw new RestException(Status.PRECONDITION_FAILED, "ClusterIds should not be null or empty");
                     }
-                    if (!namespaceName.isGlobal() && !(clusterIds.size() == 1
-                            && clusterIds.get(0).equals(pulsar().getConfiguration().getClusterName()))) {
-                            throw new RestException(Status.PRECONDITION_FAILED,
-                                    "Cannot set replication on a non-global namespace");
-                    }
-                    Set<String> replicationClusterSet = Sets.newHashSet(clusterIds);
-                    if (replicationClusterSet.contains("global")) {
-                        throw new RestException(Status.PRECONDITION_FAILED,
-                                "Cannot specify global in the list of replication clusters");
-                    }
-                    return replicationClusterSet;
+                    return Sets.newHashSet(clusterIds);
                 }).thenCompose(replicationClusterSet -> clustersAsync()
                         .thenCompose(clusters -> {
                             List<CompletableFuture<Void>> futures =
@@ -867,10 +831,361 @@ public abstract class NamespacesBase extends AdminResource {
                                     }).collect(Collectors.toList());
                             return FutureUtil.waitForAll(futures).thenApply(__ -> replicationClusterSet);
                         }))
-                .thenCompose(replicationClusterSet -> updatePoliciesAsync(namespaceName, policies -> {
+                .thenCompose(replicationClusterSet -> {
+                    if (!compareTopicPartitions) {
+                        return CompletableFuture.completedFuture(replicationClusterSet);
+                    }
+                    return getNamespacePoliciesAsync(namespaceName)
+                        .thenCompose(policies ->
+                            validateReplicationClusterCompatibility(replicationClusterSet,
+                            policies.replication_clusters))
+                        .thenApply(__ -> replicationClusterSet);
+                }).thenCompose(replicationClusterSet -> updatePoliciesAsync(namespaceName, policies -> {
                     policies.replication_clusters = replicationClusterSet;
                     return policies;
                 }));
+    }
+
+    /**
+     * Validates compatibility between clusters when enabling namespace-level replication.
+     * This validation is only performed for newly added clusters.
+     * This includes:
+     * <ul>
+     *   <li>All topics' partitions that have been created should be the same across clusters,
+     *       including the __change_events system topic</li>
+     *   <li>Auto-creation policies between clusters should be the same, including broker-level
+     *       and namespace-level settings</li>
+     * </ul>
+     *
+     * @param replicationClusterSet the new set of clusters to be configured
+     * @param existingClusters the existing set of replication clusters
+     * @return a CompletableFuture that completes when validation passes, or fails with RestException
+     */
+    private CompletableFuture<Void> validateReplicationClusterCompatibility(Set<String> replicationClusterSet,
+                                                                             Set<String> existingClusters) {
+        String localCluster = pulsar().getConfiguration().getClusterName();
+
+        // Skip validation if local cluster is not in the replication set
+        if (!replicationClusterSet.contains(localCluster)) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        // Find newly added clusters
+        Set<String> newlyAddedClusters = new HashSet<>(replicationClusterSet);
+        if (existingClusters != null) {
+            newlyAddedClusters.removeAll(existingClusters);
+        }
+
+        if (newlyAddedClusters.isEmpty()) {
+            // No new clusters added, skip validation
+            return CompletableFuture.completedFuture(null);
+        }
+
+        List<String> newRemoteClusters = newlyAddedClusters.stream()
+                .filter(cluster -> !cluster.equals(localCluster))
+                .collect(Collectors.toList());
+
+        if (newRemoteClusters.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        // Validate compatibility with each newly added remote cluster
+        List<CompletableFuture<Void>> validationFutures = newRemoteClusters.stream()
+                .map(remoteCluster -> validateClusterPairCompatibility(localCluster, remoteCluster))
+                .collect(Collectors.toList());
+
+        return FutureUtil.waitForAll(validationFutures);
+    }
+
+    /**
+     * Validates compatibility between the local cluster and a remote cluster.
+     */
+    private CompletableFuture<Void> validateClusterPairCompatibility(String localCluster, String remoteCluster) {
+        return clusterResources().getClusterAsync(remoteCluster)
+                .thenCompose(clusterDataOpt -> {
+                    if (clusterDataOpt.isEmpty()) {
+                        throw new RestException(Status.NOT_FOUND, "Cluster " + remoteCluster + " does not exist");
+                    }
+                    ClusterData clusterData = clusterDataOpt.get();
+                    PulsarAdmin remoteAdmin;
+                    try {
+                        remoteAdmin = pulsar().getBrokerService()
+                                .getClusterPulsarAdmin(remoteCluster, Optional.of(clusterData));
+                    } catch (Exception e) {
+                        throw new RestException(Status.INTERNAL_SERVER_ERROR,
+                            "Failed to update clusters because failed to create admin client for cluster "
+                            + remoteCluster + ": " + e.getMessage());
+                    }
+
+                    // If the local cluster and the target cluster are sharing ZK, the target cluster cannot create any
+                    // topic before enabling replication, so verification can be skipped.
+                    CompletableFuture<Policies> remoteNsPoliciesFuture = new CompletableFuture<>();
+                    remoteAdmin.namespaces().getPoliciesAsync(namespaceName.toString())
+                        .handle((v, ex) -> {
+                            if (ex == null) {
+                                remoteNsPoliciesFuture.complete(v);
+                                return null;
+                            }
+                            // If namespace doesn't have override, return null.
+                            Throwable actEx = FutureUtil.unwrapCompletionException(ex);
+                            if (actEx instanceof PulsarAdminException.NotFoundException) {
+                                remoteNsPoliciesFuture.completeExceptionally(new RestException(Status.CONFLICT,
+                                    String.format("Failed to check auto-topic creation policy for"
+                                    + " namespace '%s' between local cluster and remote cluster"
+                                    + " '%s' -> '%s'. Please ensure the namespace exists on the remote"
+                                    + " side.",
+                                    namespaceName.toString(), pulsar().getConfig().getClusterName(),
+                                    remoteCluster)));
+                            }
+                            remoteNsPoliciesFuture.completeExceptionally(actEx);
+                            return null;
+                        });
+                    return remoteNsPoliciesFuture
+                        .thenCompose(remoteNsPolicies -> {
+                            if (!remoteNsPolicies.replication_clusters.contains(remoteCluster)
+                                    && !remoteNsPolicies.allowed_clusters.contains(remoteCluster)) {
+                                return CompletableFuture.completedFuture(null);
+                            }
+                            // Validate both partition compatibility and auto-creation policy compatibility
+                            return validatePartitionCompatibility(remoteAdmin, remoteCluster)
+                                    .thenCompose(__ -> validateAutoTopicCreationCompatibility(remoteAdmin,
+                                        remoteCluster, remoteNsPolicies));
+                    });
+                });
+    }
+
+    /**
+     * Validates partition compatibility between local and remote clusters.
+     * <ul>
+     *   <li>All partitioned topics (including __change_events) that exist in the local cluster
+     *       must have the same partition count in the remote cluster (if they exist there).</li>
+     *   <li>Non-partitioned topics in the local cluster must not exist as partitioned topics
+     *       in the remote cluster.</li>
+     * </ul>
+     */
+    private CompletableFuture<Void> validatePartitionCompatibility(PulsarAdmin remoteAdmin, String remoteCluster) {
+        // Get local partitioned topics
+        CompletableFuture<List<String>> localPartitionedTopicsFuture =
+                pulsar().getNamespaceService().getFullListOfPartitionedTopic(namespaceName);
+
+        // Get persistent topics only (non-persistent topics don't have persistent state
+        // and getListOfNonPersistentTopics triggers global namespace ownership validation
+        // which fails when namespace has no clusters configured yet)
+        CompletableFuture<List<String>> localAllTopicsFuture =
+                pulsar().getNamespaceService().getListOfPersistentTopics(namespaceName);
+
+        return localPartitionedTopicsFuture.thenCombine(localAllTopicsFuture,
+                (localPartitionedTopics, localAllTopics) -> {
+                    // Find non-partitioned topics (topics that are not in the partitioned list
+                    // and are not partition suffixes of partitioned topics)
+                    Set<String> partitionedTopicSet = new HashSet<>(localPartitionedTopics);
+                    List<String> localNonPartitionedTopics = localAllTopics.stream()
+                            .map(TopicName::get)
+                            .filter(topicName -> !partitionedTopicSet.contains(
+                                    topicName.getPartitionedTopicName()))
+                            .map(TopicName::toString)
+                            .distinct()
+                            .collect(Collectors.toList());
+
+                    return new TopicLists(localPartitionedTopics, localNonPartitionedTopics);
+                })
+                .thenCompose(topicLists -> {
+                    List<CompletableFuture<Void>> validations = new ArrayList<>();
+
+                    // Validate partitioned topics have same partition count
+                    for (String topic : topicLists.partitionedTopics) {
+                        validations.add(compareTopicPartitions(topic, remoteAdmin, remoteCluster));
+                    }
+
+                    // Validate non-partitioned topics don't exist as partitioned on remote
+                    for (String topic : topicLists.nonPartitionedTopics) {
+                        validations.add(validateNonPartitionedTopicCompatibility(topic, remoteAdmin, remoteCluster));
+                    }
+
+                    return FutureUtil.waitForAll(validations);
+                });
+    }
+
+    /**
+     * Helper class to hold partitioned and non-partitioned topic lists.
+     */
+    private static class TopicLists {
+        final List<String> partitionedTopics;
+        final List<String> nonPartitionedTopics;
+
+        TopicLists(List<String> partitionedTopics, List<String> nonPartitionedTopics) {
+            this.partitionedTopics = partitionedTopics;
+            this.nonPartitionedTopics = nonPartitionedTopics;
+        }
+    }
+
+    /**
+     * Validates that a non-partitioned topic on local does not exist as a partitioned topic on remote.
+     */
+    private CompletableFuture<Void> validateNonPartitionedTopicCompatibility(String topic, PulsarAdmin remoteAdmin,
+                                                                              String remoteCluster) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        remoteAdmin.topics().getPartitionedTopicMetadataAsync(topic)
+            .thenAccept(remoteMetadata -> {
+                // If remote has partitions > 0, it's a partitioned topic, which is incompatible
+                if (remoteMetadata.partitions > 0) {
+                    future.completeExceptionally(new RestException(Status.CONFLICT,
+                            String.format("Topic type mismatch for topic '%s': local cluster has a "
+                                            + "non-partitioned topic, but remote cluster '%s' has a partitioned "
+                                            + "topic with %d partitions. "
+                                            + "Please ensure topic types are the same before enabling replication.",
+                                    topic, remoteCluster, remoteMetadata.partitions)));
+                }
+                future.complete(null);
+            })
+            .exceptionally(ex -> {
+                // If topic doesn't exist on remote, that's fine
+                if (ex.getCause() instanceof PulsarAdminException.NotFoundException
+                        || ex instanceof PulsarAdminException.NotFoundException) {
+                    future.complete(null);
+                    return null;
+                }
+                log.error("Failed to validate remote-side non-partitioned topic metadata for topic '{}'", topic,
+                    ex);
+                future.completeExceptionally(new RestException(Status.CONFLICT,
+                    "Failed to validate remote-side non-partitioned topic metadata for topic  " + topic));
+                return null;
+            });
+        return future;
+    }
+
+    /**
+     * Compares the partition count of a topic between local and remote clusters.
+     * If the topic exists on local but not on remote, validation passes.
+     * If the topic exists on both clusters, partition counts must match.
+     */
+    private CompletableFuture<Void> compareTopicPartitions(String topic, PulsarAdmin remoteAdmin,
+                                                           String remoteCluster) {
+        TopicName topicName = TopicName.get(topic);
+
+        // Get local partition metadata
+        CompletableFuture<Optional<PartitionedTopicMetadata>> localMetadataFuture =
+                pulsar().getPulsarResources().getNamespaceResources()
+                        .getPartitionedTopicResources().getPartitionedTopicMetadataAsync(topicName);
+
+        // Get remote partition metadata, return Optional.empty() if topic doesn't exist
+        CompletableFuture<Optional<PartitionedTopicMetadata>> remoteMetadataFuture =
+                remoteAdmin.topics().getPartitionedTopicMetadataAsync(topic)
+                        .thenApply(Optional::of)
+                        .exceptionally(ex -> {
+                            // If topic doesn't exist on remote, return empty
+                            if (ex.getCause() instanceof PulsarAdminException.NotFoundException
+                                    || ex instanceof PulsarAdminException.NotFoundException) {
+                                return Optional.empty();
+                            }
+                            throw new CompletionException(ex);
+                        });
+
+        return localMetadataFuture.thenCombine(remoteMetadataFuture, (localMetadataOpt, remoteMetadataOpt) -> {
+            // If topic doesn't exist on remote, validation passes
+            if (remoteMetadataOpt.isEmpty()) {
+                return null;
+            }
+
+            int localPartitions = localMetadataOpt.map(m -> m.partitions).orElse(0);
+            int remotePartitions = remoteMetadataOpt.get().partitions;
+
+            if (localPartitions != remotePartitions) {
+                String topicType = SystemTopicNames.isTopicPoliciesSystemTopic(topic)
+                        ? "__change_events system topic" : "topic";
+                throw new RestException(Status.CONFLICT,
+                        String.format("Partition count mismatch for %s '%s': local cluster has %d partitions, "
+                                        + "remote cluster '%s' has %d partitions. "
+                                        + "Please ensure partition counts are the same before enabling replication.",
+                                topicType, topic, localPartitions, remoteCluster, remotePartitions));
+            }
+            return null;
+        });
+    }
+
+    /**
+     * Validates that the effective auto-topic creation policies are the same between local and remote clusters.
+     * The effective policy is computed by: namespace-level policy overrides broker-level if it exists.
+     */
+    private CompletableFuture<Void> validateAutoTopicCreationCompatibility(PulsarAdmin remoteAdmin,
+                                                                    String remoteCluster, Policies remoteNsPolicies) {
+        String namespaceStr = namespaceName.toString();
+
+        // Get local broker config
+        ServiceConfiguration localConfig = pulsar().getConfiguration();
+        TopicType localBrokerAutoCreationType = localConfig.getAllowAutoTopicCreationType();
+        int localBrokerDefaultPartitions = localConfig.getDefaultNumPartitions();
+
+        // Get local namespace policy
+        CompletableFuture<AutoTopicCreationOverride> localNsPolicyFuture =
+                getNamespacePoliciesAsync(namespaceName)
+                        .thenApply(policies -> policies.autoTopicCreationOverride);
+
+        // Get remote broker config
+        CompletableFuture<Map<String, String>> remoteBrokerConfigFuture =
+                remoteAdmin.brokers().getRuntimeConfigurationsAsync();
+
+        return CompletableFuture.allOf(localNsPolicyFuture, remoteBrokerConfigFuture)
+                .thenAccept(__ -> {
+                    AutoTopicCreationOverride localNsPolicy = localNsPolicyFuture.join();
+                    Map<String, String> remoteBrokerConfig = remoteBrokerConfigFuture.join();
+                    AutoTopicCreationOverride remoteNsPolicy = remoteNsPolicies.autoTopicCreationOverride;
+
+                    // Parse remote broker config
+                    String remoteAutoCreationTypeStr = remoteBrokerConfig.getOrDefault(
+                            "allowAutoTopicCreationType", "non-partitioned");
+                    // Convert to uppercase and replace hyphen with underscore for enum parsing
+                    TopicType remoteBrokerAutoCreationType = TopicType.valueOf(
+                            remoteAutoCreationTypeStr.toUpperCase().replace("-", "_"));
+                    int remoteBrokerDefaultPartitions = Integer.parseInt(
+                            remoteBrokerConfig.getOrDefault("defaultNumPartitions", "1"));
+
+                    // Compute effective local policy (namespace-level overrides broker-level if exists)
+                    String localEffectiveTopicType;
+                    int localEffectiveDefaultPartitions;
+                    if (localNsPolicy != null) {
+                        localEffectiveTopicType = localNsPolicy.getTopicType();
+                        localEffectiveDefaultPartitions = localNsPolicy.getDefaultNumPartitions() != null
+                                ? localNsPolicy.getDefaultNumPartitions() : localBrokerDefaultPartitions;
+                    } else {
+                        localEffectiveTopicType = localBrokerAutoCreationType.toString();
+                        localEffectiveDefaultPartitions = localBrokerDefaultPartitions;
+                    }
+
+                    // Compute effective remote policy (namespace-level overrides broker-level if exists)
+                    String remoteEffectiveTopicType;
+                    int remoteEffectiveDefaultPartitions;
+                    if (remoteNsPolicy != null) {
+                        remoteEffectiveTopicType = remoteNsPolicy.getTopicType();
+                        remoteEffectiveDefaultPartitions = remoteNsPolicy.getDefaultNumPartitions() != null
+                                ? remoteNsPolicy.getDefaultNumPartitions() : remoteBrokerDefaultPartitions;
+                    } else {
+                        remoteEffectiveTopicType = remoteBrokerAutoCreationType.toString();
+                        remoteEffectiveDefaultPartitions = remoteBrokerDefaultPartitions;
+                    }
+
+                    // Compare effective policies (only topicType and defaultNumPartitions)
+                    List<String> mismatches = new ArrayList<>();
+                    if (!Objects.equals(localEffectiveTopicType, remoteEffectiveTopicType)) {
+                        mismatches.add(String.format("topicType: local=%s, remote=%s",
+                                localEffectiveTopicType, remoteEffectiveTopicType));
+                    }
+                    // Pulsar does not allow to set a special partition count with non-partitioned topic type, comparing
+                    // default topic count either default topic type is partitioned or non-partitioned.
+                    if (localEffectiveDefaultPartitions != remoteEffectiveDefaultPartitions) {
+                        mismatches.add(String.format("defaultNumPartitions: local=%d, remote=%d",
+                                localEffectiveDefaultPartitions, remoteEffectiveDefaultPartitions));
+                    }
+
+                    if (!mismatches.isEmpty()) {
+                        throw new RestException(Status.CONFLICT,
+                                String.format("Effective auto-topic creation policy mismatch for namespace '%s' "
+                                                + "between local cluster and remote cluster '%s': %s. "
+                                                + "Please ensure auto-topic creation policies are the same "
+                                                + "before enabling replication.",
+                                        namespaceStr, remoteCluster, String.join("; ", mismatches)));
+                    }
+                });
     }
 
     protected CompletableFuture<Void> internalSetNamespaceMessageTTLAsync(Integer messageTTL) {
@@ -985,14 +1300,8 @@ public abstract class NamespacesBase extends AdminResource {
         return validateSuperUserAccessAsync()
                 .thenCompose(__ -> {
                     log.info("[{}] Unloading namespace {}", clientAppId(), namespaceName);
-                    if (namespaceName.isGlobal()) {
-                        // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-                        return validateGlobalNamespaceOwnershipAsync(namespaceName);
-                    } else {
-                        return validateClusterOwnershipAsync(namespaceName.getCluster())
-                                .thenCompose(ignore -> validateClusterForTenantAsync(namespaceName.getTenant(),
-                                        namespaceName.getCluster()));
-                    }
+                    // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
+                    return validateGlobalNamespaceOwnershipAsync(namespaceName);
                 })
                 .thenCompose(__ -> getNamespacePoliciesAsync(namespaceName))
                 .thenCompose(policies -> {
@@ -1016,13 +1325,8 @@ public abstract class NamespacesBase extends AdminResource {
         return validateSuperUserAccessAsync().thenCompose(__ -> {
             log.info("[{}] Setting bookie affinity group {} for namespace {}", clientAppId(), bookieAffinityGroup,
                     this.namespaceName);
-            if (namespaceName.isGlobal()) {
-                // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return validateClusterOwnershipAsync(namespaceName.getCluster()).thenCompose(
-                        unused -> validateClusterForTenantAsync(namespaceName.getTenant(), namespaceName.getCluster()));
-            }
+            // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
+            return validateGlobalNamespaceOwnershipAsync(namespaceName);
         }).thenCompose(__ -> getDefaultBundleDataAsync().thenCompose(
                 defaultBundleData -> getLocalPolicies().setLocalPoliciesWithCreateAsync(namespaceName, oldPolicies ->
                         oldPolicies.map(policies -> new LocalPolicies(policies.bundles, bookieAffinityGroup,
@@ -1039,13 +1343,8 @@ public abstract class NamespacesBase extends AdminResource {
 
     protected CompletableFuture<BookieAffinityGroupData> internalGetBookieAffinityGroupAsync() {
         return validateSuperUserAccessAsync().thenCompose(__ -> {
-            if (namespaceName.isGlobal()) {
-                // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return validateClusterOwnershipAsync(namespaceName.getCluster()).thenCompose(
-                        unused -> validateClusterForTenantAsync(namespaceName.getTenant(), namespaceName.getCluster()));
-            }
+            // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
+            return validateGlobalNamespaceOwnershipAsync(namespaceName);
         }).thenCompose(__ -> getLocalPolicies().getLocalPoliciesAsync(namespaceName))
                 .thenApply(policies -> policies.orElseThrow(() -> new RestException(Status.NOT_FOUND,
                         "Namespace local-policies does not exist")).bookieAffinityGroup);
@@ -1150,14 +1449,8 @@ public abstract class NamespacesBase extends AdminResource {
                 )
                 .thenCompose(isOwnedByLocalCluster -> {
                     if (!isOwnedByLocalCluster) {
-                        if (namespaceName.isGlobal()) {
-                            // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-                            return validateGlobalNamespaceOwnershipAsync(namespaceName);
-                        } else {
-                            return validateClusterOwnershipAsync(namespaceName.getCluster())
-                                    .thenCompose(__ -> validateClusterForTenantAsync(namespaceName.getTenant(),
-                                            namespaceName.getCluster()));
-                        }
+                        // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
+                        return validateGlobalNamespaceOwnershipAsync(namespaceName);
                     } else {
                         return CompletableFuture.completedFuture(null);
                     }
@@ -1207,14 +1500,8 @@ public abstract class NamespacesBase extends AdminResource {
                     }
                 })
                 .thenCompose(__ -> {
-                    if (namespaceName.isGlobal()) {
-                        // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-                        return validateGlobalNamespaceOwnershipAsync(namespaceName);
-                    } else {
-                        return validateClusterOwnershipAsync(namespaceName.getCluster())
-                                .thenCompose(ignore -> validateClusterForTenantAsync(namespaceName.getTenant(),
-                                        namespaceName.getCluster()));
-                    }
+                    // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
+                    return validateGlobalNamespaceOwnershipAsync(namespaceName);
                 })
                 .thenCompose(__ -> validatePoliciesReadOnlyAccessAsync())
                 .thenCompose(__ -> getBundleRangeAsync(bundleName))
@@ -1381,6 +1668,7 @@ public abstract class NamespacesBase extends AdminResource {
         }));
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Void> internalDeleteTopicDispatchRateAsync() {
         return validateNamespacePolicyOperationAsync(namespaceName, PolicyName.RATE, PolicyOperation.WRITE)
                 .thenCompose(__ -> updatePoliciesAsync(namespaceName, policies -> {
@@ -1585,13 +1873,8 @@ public abstract class NamespacesBase extends AdminResource {
 
         Policies policies = getNamespacePolicies(namespaceName);
 
-        if (namespaceName.isGlobal()) {
-            // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-            validateGlobalNamespaceOwnership(namespaceName);
-        } else {
-            validateClusterOwnership(namespaceName.getCluster());
-            validateClusterForTenant(namespaceName.getTenant(), namespaceName.getCluster());
-        }
+        // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
+        validateGlobalNamespaceOwnership(namespaceName);
 
         validateNamespaceBundleOwnership(namespaceName, policies.bundles, bundleRange, authoritative, true);
 
@@ -1652,13 +1935,8 @@ public abstract class NamespacesBase extends AdminResource {
 
         Policies policies = getNamespacePolicies(namespaceName);
 
-        if (namespaceName.isGlobal()) {
-            // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-            validateGlobalNamespaceOwnership(namespaceName);
-        } else {
-            validateClusterOwnership(namespaceName.getCluster());
-            validateClusterForTenant(namespaceName.getTenant(), namespaceName.getCluster());
-        }
+        // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
+        validateGlobalNamespaceOwnership(namespaceName);
 
         validateNamespaceBundleOwnership(namespaceName, policies.bundles, bundleRange, authoritative, true);
 
@@ -1667,70 +1945,43 @@ public abstract class NamespacesBase extends AdminResource {
                 subscription, namespaceName, bundleRange);
     }
 
-    protected void internalUnsubscribeNamespace(AsyncResponse asyncResponse, String subscription,
-                                                boolean authoritative) {
-        validateNamespaceOperation(namespaceName, NamespaceOperation.UNSUBSCRIBE);
+    protected CompletableFuture<Void> internalUnsubscribeNamespaceAsync(String subscription,
+                                                                        boolean authoritative) {
         checkNotNull(subscription, "Subscription should not be null");
 
-        final List<CompletableFuture<Void>> futures = new ArrayList<>();
-        try {
-            NamespaceBundles bundles = pulsar().getNamespaceService().getNamespaceBundleFactory()
-                    .getBundles(namespaceName);
-            for (NamespaceBundle nsBundle : bundles.getBundles()) {
-                // check if the bundle is owned by any broker, if not then there are no subscriptions
-                if (pulsar().getNamespaceService().checkOwnershipPresent(nsBundle)) {
-                    futures.add(pulsar().getAdminClient().namespaces().unsubscribeNamespaceBundleAsync(
-                            namespaceName.toString(), nsBundle.getBundleRange(), subscription));
-                }
-            }
-        } catch (WebApplicationException wae) {
-            asyncResponse.resume(wae);
-            return;
-        } catch (Exception e) {
-            asyncResponse.resume(new RestException(e));
-            return;
-        }
-
-        FutureUtil.waitForAll(futures).handle((result, exception) -> {
-            if (exception != null) {
-                log.warn("[{}] Failed to unsubscribe {} on the bundles for namespace {}: {}", clientAppId(),
-                        subscription, namespaceName, exception.getCause().getMessage());
-                if (exception.getCause() instanceof PulsarAdminException) {
-                    asyncResponse.resume(new RestException((PulsarAdminException) exception.getCause()));
-                    return null;
-                } else {
-                    asyncResponse.resume(new RestException(exception.getCause()));
-                    return null;
-                }
-            }
-            log.info("[{}] Successfully unsubscribed {} on all the bundles for namespace {}", clientAppId(),
-                    subscription, namespaceName);
-            asyncResponse.resume(Response.noContent().build());
-            return null;
-        });
+        return validateNamespaceOperationAsync(namespaceName, NamespaceOperation.UNSUBSCRIBE)
+                .thenCompose(__ -> pulsar().getNamespaceService().getNamespaceBundleFactory()
+                        .getBundlesAsync(namespaceName))
+                .thenCompose(bundles -> {
+                    final List<CompletableFuture<Void>> futures = new ArrayList<>();
+                    for (NamespaceBundle nsBundle : bundles.getBundles()) {
+                        try {
+                            futures.add(pulsar().getAdminClient().namespaces().unsubscribeNamespaceBundleAsync(
+                                    namespaceName.toString(), nsBundle.getBundleRange(), subscription));
+                        } catch (PulsarServerException e) {
+                            return CompletableFuture.failedFuture(e);
+                        }
+                    }
+                    return FutureUtil.waitForAll(futures);
+                }).thenRun(() -> log.info("[{}] Successfully unsubscribed {} on all the bundles for namespace {}",
+                        clientAppId(), subscription, namespaceName));
     }
 
     @SuppressWarnings("deprecation")
-    protected void internalUnsubscribeNamespaceBundle(String subscription, String bundleRange, boolean authoritative) {
-        validateNamespaceOperation(namespaceName, NamespaceOperation.UNSUBSCRIBE);
+    protected CompletableFuture<Void> internalUnsubscribeNamespaceBundleAsync(String subscription, String bundleRange,
+                                                                              boolean authoritative) {
         checkNotNull(subscription, "Subscription should not be null");
         checkNotNull(bundleRange, "BundleRange should not be null");
 
-        Policies policies = getNamespacePolicies(namespaceName);
-
-        if (namespaceName.isGlobal()) {
-            // check cluster ownership for a given global namespace: redirect if peer-cluster owns it
-            validateGlobalNamespaceOwnership(namespaceName);
-        } else {
-            validateClusterOwnership(namespaceName.getCluster());
-            validateClusterForTenant(namespaceName.getTenant(), namespaceName.getCluster());
-        }
-
-        validateNamespaceBundleOwnership(namespaceName, policies.bundles, bundleRange, authoritative, true);
-
-        unsubscribe(namespaceName, bundleRange, subscription);
-        log.info("[{}] Successfully unsubscribed {} on namespace bundle {}/{}", clientAppId(), subscription,
-                namespaceName, bundleRange);
+        return validateNamespaceOperationAsync(namespaceName, NamespaceOperation.UNSUBSCRIBE)
+                .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+                .thenCompose(__ -> getNamespacePoliciesAsync(namespaceName))
+                .thenCompose(policies ->
+                        validateNamespaceBundleOwnershipAsync(namespaceName, policies.bundles, bundleRange,
+                                authoritative, false))
+                .thenCompose(bundle -> unsubscribeAsync(bundle, subscription))
+                .thenRun(() -> log.info("[{}] Successfully unsubscribed {} on namespace bundle {}/{}",
+                        clientAppId(), subscription, namespaceName, bundleRange));
     }
 
     protected void internalSetSubscriptionAuthMode(SubscriptionAuthMode subscriptionAuthMode) {
@@ -1772,6 +2023,7 @@ public abstract class NamespacesBase extends AdminResource {
         }
     }
 
+    @SuppressWarnings("deprecation")
     protected Boolean internalGetEncryptionRequired() {
         validateNamespacePolicyOperation(namespaceName, PolicyName.ENCRYPTION, PolicyOperation.READ);
         Policies policies = getNamespacePolicies(namespaceName);
@@ -1918,32 +2170,45 @@ public abstract class NamespacesBase extends AdminResource {
         }
     }
 
-    private void unsubscribe(NamespaceName nsName, String bundleRange, String subscription) {
-        try {
-            List<Topic> topicList = pulsar().getBrokerService().getAllTopicsFromNamespaceBundle(nsName.toString(),
-                    nsName.toString() + "/" + bundleRange);
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
-            if (subscription.startsWith(pulsar().getConfiguration().getReplicatorPrefix())) {
-                throw new RestException(Status.PRECONDITION_FAILED, "Cannot unsubscribe a replication cursor");
-            } else {
-                for (Topic topic : topicList) {
-                    Subscription sub = topic.getSubscription(subscription);
-                    if (sub != null) {
-                        futures.add(sub.delete());
-                    }
-                }
-            }
-            FutureUtil.waitForAll(futures).get();
-        } catch (RestException re) {
-            throw re;
-        } catch (Exception e) {
-            log.error("[{}] Failed to unsubscribe {} for namespace {}/{}", clientAppId(), subscription,
-                    nsName.toString(), bundleRange, e);
-            if (e.getCause() instanceof SubscriptionBusyException) {
-                throw new RestException(Status.PRECONDITION_FAILED, "Subscription has active connected consumers");
-            }
-            throw new RestException(e.getCause());
+    private CompletableFuture<Void> unsubscribeAsync(NamespaceBundle bundle, String subscription) {
+        if (subscription.startsWith(pulsar().getConfiguration().getReplicatorPrefix())) {
+            return CompletableFuture.failedFuture(
+                    new RestException(Status.PRECONDITION_FAILED, "Cannot unsubscribe a replication cursor"));
         }
+
+        return pulsar().getNamespaceService().getOwnedTopicListForNamespaceBundle(bundle)
+                .thenCompose(topicsInBundle -> {
+                    List<CompletableFuture<Void>> futures = new ArrayList<>();
+                    for (String topic : topicsInBundle) {
+                        TopicName topicName = TopicName.get(topic);
+                        if (pulsar().getBrokerService().isSystemTopic(topicName)) {
+                            continue;
+                        }
+                        futures.add(pulsar().getBrokerService().getTopic(topicName.toString(), false)
+                                .thenCompose(optTopic -> {
+                                    if (optTopic.isEmpty()) {
+                                        return CompletableFuture.completedFuture(null);
+                                    }
+                                    Topic loaded = optTopic.get();
+                                    Subscription sub = loaded.getSubscription(subscription);
+                                    if (sub == null) {
+                                        return CompletableFuture.completedFuture(null);
+                                    }
+                                    return sub.delete();
+                                }));
+                    }
+                    return FutureUtil.waitForAll(futures);
+                }).exceptionally(ex -> {
+                    Throwable cause = FutureUtil.unwrapCompletionException(ex);
+                    if (cause instanceof RestException) {
+                        throw (RestException) cause;
+                    }
+                    if (cause instanceof SubscriptionBusyException) {
+                        throw new RestException(Status.PRECONDITION_FAILED,
+                                "Subscription has active connected consumers");
+                    }
+                    throw new RestException(cause);
+                });
     }
 
     protected BundlesData validateBundlesData(BundlesData initialBundles) {
@@ -1977,7 +2242,7 @@ public abstract class NamespacesBase extends AdminResource {
                     + " Repl clusters: %s, allowed clusters: %s",
                     ns.toString(), policies.replication_clusters, policies.allowed_clusters);
             log.info(msg);
-            throw new RestException(Status.BAD_REQUEST, msg);
+            return FutureUtil.failedFuture(new RestException(Status.BAD_REQUEST, msg));
         }
         pulsar().getBrokerService().setCurrentClusterAllowedIfNoClusterIsAllowed(ns, policies);
 
@@ -2331,7 +2596,20 @@ public abstract class NamespacesBase extends AdminResource {
                 "subscriptionTypesEnabled");
     }
 
+    protected CompletableFuture<Void> internalSetAllowedTopicPropertyKeysForMetricsAsync(Set<String> allowedKeys) {
+        return validateNamespacePolicyOperationAsync(namespaceName, PolicyName.ALLOW_CUSTOM_METRIC_LABELS,
+            PolicyOperation.WRITE)
+            .thenCompose(__ -> validatePoliciesReadOnlyAccessAsync())
+            .thenAccept(__ -> pulsar().validateCustomMetricLabelKeys(allowedKeys))
+            .thenCompose(__ -> updatePoliciesAsync(namespaceName, policies -> {
+                policies.allowed_topic_property_keys_for_metrics = allowedKeys != null
+                    ? new HashSet<>(allowedKeys) : null;
+                return policies;
+            }));
+    }
 
+
+    @SuppressWarnings({"deprecation", "unchecked"})
     private <T> void mutatePolicy(Function<Policies, Policies> policyTransformation,
                                   Function<Policies, T> getter,
                                   String policyName) {
@@ -2645,6 +2923,7 @@ public abstract class NamespacesBase extends AdminResource {
         internalSetPolicies("resource_group_name", rgName);
     }
 
+    @SuppressWarnings("deprecation")
     protected void internalScanOffloadedLedgers(OffloaderObjectsScannerUtils.ScannerResultSink sink)
             throws Exception {
         log.info("internalScanOffloadedLedgers {}", namespaceName);
@@ -2866,14 +3145,8 @@ public abstract class NamespacesBase extends AdminResource {
                 .thenCompose(__ -> FutureUtil.waitForAll(clusterIds.stream().map(clusterId ->
                         validateClusterForTenantAsync(namespaceName.getTenant(), clusterId))
                         .collect(Collectors.toList())))
-                // Allowed clusters should include all the existed replication clusters and could not contain global
-                // cluster.
                 .thenCompose(__ -> {
                     checkNotNull(clusterIds, "ClusterIds should not be null");
-                    if (clusterIds.contains("global")) {
-                        throw new RestException(Status.PRECONDITION_FAILED,
-                                "Cannot specify global in the list of allowed clusters");
-                    }
                     return getNamespacePoliciesAsync(this.namespaceName).thenApply(nsPolicies -> {
                         Set<String> clusterSet = Sets.newHashSet(clusterIds);
                         if (!Policies.checkNewAllowedClusters(nsPolicies, clusterSet)){
@@ -2910,12 +3183,7 @@ public abstract class NamespacesBase extends AdminResource {
      */
     protected CompletableFuture<Set<String>> internalGetNamespaceAllowedClustersAsync() {
         return validateNamespacePolicyOperationAsync(namespaceName, PolicyName.ALLOW_CLUSTERS, PolicyOperation.READ)
-                .thenAccept(__ -> {
-                    if (!namespaceName.isGlobal()) {
-                        throw new RestException(Status.PRECONDITION_FAILED,
-                                "Cannot get the allowed clusters for a non-global namespace");
-                    }
-                }).thenCompose(__ -> getNamespacePoliciesAsync(namespaceName))
+                .thenCompose(__ -> getNamespacePoliciesAsync(namespaceName))
                 .thenApply(policies -> policies.allowed_clusters);
     }
 

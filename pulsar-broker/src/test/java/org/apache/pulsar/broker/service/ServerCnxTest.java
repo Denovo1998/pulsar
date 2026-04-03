@@ -188,14 +188,13 @@ public class ServerCnxTest {
     private final int currentProtocolVersion = ProtocolVersion.values()[ProtocolVersion.values().length - 1]
             .getValue();
 
-    protected final String successTopicName = "persistent://prop/use/ns-abc/successTopic";
-    private final String failTopicName = "persistent://prop/use/ns-abc/failTopic";
-    private final String nonOwnedTopicName = "persistent://prop/use/ns-abc/success-not-owned-topic";
-    private final String encryptionRequiredTopicName = "persistent://prop/use/ns-abc/successEncryptionRequiredTopic";
+    protected final String successTopicName = "persistent://prop/ns-abc/successTopic";
+    private final String failTopicName = "persistent://prop/ns-abc/failTopic";
+    private final String nonOwnedTopicName = "persistent://prop/ns-abc/success-not-owned-topic";
+    private final String encryptionRequiredTopicName = "persistent://prop/ns-abc/successEncryptionRequiredTopic";
     private final String successSubName = "successSub";
     private final String nonExistentTopicName =
-            "persistent://nonexistent-prop/nonexistent-cluster/nonexistent-namespace/successNonExistentTopic";
-    private final String topicWithNonLocalCluster = "persistent://prop/usw/ns-abc/successTopic";
+            "persistent://nonexistent-prop/nonexistent-namespace/successNonExistentTopic";
     private final List<String> matchingTopics = Arrays.asList(
             "persistent://use/ns-abc/topic-1",
             "persistent://use/ns-abc/topic-2");
@@ -1078,6 +1077,7 @@ public class ServerCnxTest {
         channel.finish();
         channel2.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testHandleConsumerAfterClientChannelInactive() throws Exception {
@@ -1119,6 +1119,7 @@ public class ServerCnxTest {
         channel.finish();
         channel2.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void test2ndSubFailedIfDisabledConCheck()
@@ -1715,13 +1716,6 @@ public class ServerCnxTest {
                 "prod-name", Collections.emptyMap(), false);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandProducerSuccess);
-
-        resetChannel();
-        setChannelConnected();
-        clientCommand = Commands.newProducer(topicWithNonLocalCluster, 1 /* producer id */, 1 /* request id */,
-                "prod-name", Collections.emptyMap(), false);
-        channel.writeInbound(clientCommand);
-        assertTrue(getResponse() instanceof CommandError);
         channel.finish();
     }
 
@@ -2389,7 +2383,10 @@ public class ServerCnxTest {
             assertEquals(((CommandError) response).getRequestId(), 5);
 
             // We should receive response for 1st producer, since it was not cancelled by the close
-            Awaitility.await().untilAsserted(() -> assertFalse(channel.outboundMessages().isEmpty()));
+            Awaitility.await().untilAsserted(() -> {
+                channel.runPendingTasks();
+                assertFalse(channel.outboundMessages().isEmpty());
+            });
 
             assertTrue(channel.isActive());
             response = getResponse();
@@ -2644,6 +2641,7 @@ public class ServerCnxTest {
         assertNull(channel.outboundMessages().peek());
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testProducerSuccessOnEncryptionRequiredTopic() throws Exception {
@@ -2682,6 +2680,7 @@ public class ServerCnxTest {
 
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testProducerFailureOnEncryptionRequiredTopic() throws Exception {
@@ -2722,6 +2721,7 @@ public class ServerCnxTest {
 
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testProducerFailureOnEncryptionRequiredOnBroker() throws Exception {
@@ -2764,6 +2764,7 @@ public class ServerCnxTest {
 
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testSendSuccessOnEncryptionRequiredTopic() throws Exception {
@@ -2810,6 +2811,7 @@ public class ServerCnxTest {
         assertTrue(getResponse() instanceof CommandSendReceipt);
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testSendFailureOnEncryptionRequiredTopic() throws Exception {
@@ -2897,6 +2899,8 @@ public class ServerCnxTest {
         final long sleepTimeMs = 10;
         final long iterations = TimeUnit.SECONDS.toMillis(10) / sleepTimeMs;
         for (int i = 0; i < iterations; i++) {
+            // Execute tasks submitted to ctx.executor() via thenAcceptAsync/thenRunAsync etc.
+            channel.runPendingTasks();
             if (!channel.outboundMessages().isEmpty()) {
                 Object outObject = channel.outboundMessages().remove();
                 Object cmd = clientChannelHelper.getCommand(outObject);
@@ -3418,6 +3422,7 @@ public class ServerCnxTest {
             channel.finish();
         }
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testHandleAuthResponseWithoutClientVersion() throws Exception {

@@ -2361,11 +2361,6 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private TopicType allowAutoTopicCreationType = TopicType.NON_PARTITIONED;
     @FieldContext(category = CATEGORY_SERVER, dynamic = true,
-            doc = "If 'allowAutoTopicCreation' is true and the name of the topic contains 'cluster',"
-                    + "the topic cannot be automatically created."
-    )
-    private boolean allowAutoTopicCreationWithLegacyNamingScheme = true;
-    @FieldContext(category = CATEGORY_SERVER, dynamic = true,
             doc = "If 'strictSubscriptionNameVerification' is true, the new subscription name can only contain"
                 + " (a-zA-Z_0-9) and these special chars -=:."
     )
@@ -3428,6 +3423,16 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private SchemaCompatibilityStrategy schemaCompatibilityStrategy = SchemaCompatibilityStrategy.FULL;
 
+    @FieldContext(
+        category = CATEGORY_SCHEMA,
+        doc = "Whether to allow legacy Jackson JsonSchema format for SchemaType.JSON schema definitions. "
+            + "When false (default), only valid Apache Avro schema format is accepted for SchemaType.JSON, "
+            + "consistent with what the consumer side requires. When true, the pre-2.1 backward-compatible "
+            + "behavior is preserved for deployments that still have topics with legacy-format schemas. "
+            + "See PIP-464 for details."
+    )
+    private boolean schemaJsonAllowLegacyJacksonFormat = false;
+
     /**** --- WebSocket. --- ****/
     @FieldContext(
         category = CATEGORY_WEBSOCKET,
@@ -3553,6 +3558,21 @@ public class ServiceConfiguration implements PulsarConfiguration {
             doc = "Enable expose the broker bundles metrics."
     )
     private boolean exposeBundlesMetricsInPrometheus = false;
+
+    @FieldContext(
+            category = CATEGORY_METRICS,
+            doc = "Enable or disable custom topic metric labels feature. "
+                    + "If enabled, custom metric labels can be set on topics and will be exposed in metrics. "
+                    + "Default is false."
+    )
+    private boolean exposeCustomTopicMetricLabelsEnabled = false;
+
+    @FieldContext(
+            category = CATEGORY_METRICS,
+            doc = "A comma-separated list of Topic Property keys that are allowed to be exposed as metrics."
+            + "Only keys explicitly listed here will be exposed."
+    )
+    private Set<String> allowedTopicPropertyKeysForMetrics = new HashSet<>();
 
     /**** --- Functions. --- ****/
     @FieldContext(

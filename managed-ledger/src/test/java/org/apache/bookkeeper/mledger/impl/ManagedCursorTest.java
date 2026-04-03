@@ -113,9 +113,9 @@ import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.ScanOutcome;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl.VoidCallback;
 import org.apache.bookkeeper.mledger.impl.MetaStore.MetaStoreCallback;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedCursorInfo;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.PositionInfo;
+import org.apache.bookkeeper.mledger.proto.ManagedCursorInfo;
+import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo;
+import org.apache.bookkeeper.mledger.proto.PositionInfo;
 import org.apache.bookkeeper.mledger.util.ManagedLedgerTestUtil;
 import org.apache.bookkeeper.mledger.util.ManagedLedgerUtils;
 import org.apache.bookkeeper.test.MockedBookKeeperTestCase;
@@ -834,7 +834,7 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         ManagedCursor cursor = ledger.openCursor("c1");
 
         for (int i = 0; i < 100; i++) {
-            ledger.addEntry(new byte[(int) (1024)]);
+            ledger.addEntry(new byte[1024]);
         }
 
         // Since https://github.com/apache/pulsar/pull/23931 improved the performance of delivery, the consumer
@@ -1077,7 +1077,7 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         final int messages = 100;
         final int consumers = 5;
 
-        List<Future<AtomicBoolean>> futures = new ArrayList();
+        List<Future<AtomicBoolean>> futures = new ArrayList<>();
         @Cleanup("shutdownNow")
         ExecutorService executor = Executors.newCachedThreadPool();
         final CyclicBarrier barrier = new CyclicBarrier(consumers + 1);
@@ -2133,7 +2133,9 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         Awaitility.await().untilAsserted(() -> {
             assertEquals(c1.getReadPosition().getEntryId(), 0);
         });
-        assertEquals(c1.getMarkDeletedPosition(), pos);
+        // The mark-delete position can be advanced beyond `pos` by TrimConsumedLedgers
+        // which runs asynchronously and may move it to the next ledger's -1 position.
+        assertTrue(c1.getMarkDeletedPosition().compareTo(pos) >= 0);
     }
 
     @Test(timeOut = 20000, dataProvider = "useOpenRangeSet")
@@ -2370,7 +2372,7 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         final int messages = 100;
         final int consumers = 10;
 
-        List<Future<Void>> futures = new ArrayList();
+        List<Future<Void>> futures = new ArrayList<>();
         @Cleanup("shutdownNow")
         ExecutorService executor = Executors.newCachedThreadPool();
         final CyclicBarrier barrier = new CyclicBarrier(consumers + 1);
@@ -3113,7 +3115,7 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         ledger.addEntry("entry4".getBytes(Encoding));
 
         // 1. Replay empty position set should return empty entry set
-        Set<Position> positions = new HashSet();
+        Set<Position> positions = new HashSet<>();
         assertTrue(c1.replayEntries(positions).isEmpty());
 
         positions.add(p1);
@@ -3634,8 +3636,8 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
                 lh.asyncReadEntries(lastEntry, lastEntry, (rc1, lh1, seq, ctx1) -> {
                     try {
                         LedgerEntry entry = seq.nextElement();
-                        PositionInfo positionInfo;
-                        positionInfo = PositionInfo.parseFrom(entry.getEntry());
+                        PositionInfo positionInfo = new PositionInfo();
+                        positionInfo.parseFrom(entry.getEntry());
                         c1.recoverIndividualDeletedMessages(positionInfo);
                         individualDeletedMessagesCount.set(c1.getIndividuallyDeletedMessagesSet().asRanges().size());
                     } catch (Exception e) {
@@ -3895,16 +3897,17 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         MetaStore mockMetaStore = mock(MetaStore.class);
         doAnswer(new Answer<Object>() {
             public Object answer(InvocationOnMock invocation) {
-                ManagedCursorInfo info = ManagedCursorInfo.newBuilder().setCursorsLedgerId(cursorsLedgerId)
+                ManagedCursorInfo info = new ManagedCursorInfo().setCursorsLedgerId(cursorsLedgerId)
                         .setMarkDeleteLedgerId(markDeleteLedgerId).setMarkDeleteEntryId(markDeleteEntryId)
-                        .setLastActive(0L).build();
+                        .setLastActive(0L);
                 Stat stat = mock(Stat.class);
+                @SuppressWarnings("unchecked")
                 MetaStoreCallback<ManagedCursorInfo> callback = (MetaStoreCallback<ManagedCursorInfo>) invocation
                         .getArguments()[2];
                 callback.operationComplete(info, stat);
                 return null;
             }
-        }).when(mockMetaStore).asyncGetCursorInfo(eq(mlName), eq(cursorName), any(MetaStoreCallback.class));
+        }).when(mockMetaStore).asyncGetCursorInfo(eq(mlName), eq(cursorName), any());
 
         ManagedLedgerImpl ml = mock(ManagedLedgerImpl.class);
         when(ml.getName()).thenReturn(mlName);
@@ -3956,12 +3959,11 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         // Trigger the lastConfirmedEntry to move forward
         ml.addEntry(new byte[1]);
 
-        ManagedCursorInfo info = ManagedCursorInfo.newBuilder()
+        ManagedCursorInfo info = new ManagedCursorInfo()
                 .setCursorsLedgerId(c.getCursorLedger())
                 .setMarkDeleteLedgerId(markDeleteBeforeRecover.getLedgerId())
                 .setMarkDeleteEntryId(markDeleteBeforeRecover.getEntryId())
-                .setLastActive(0L)
-                .build();
+                .setLastActive(0L);
 
         CountDownLatch latch = new CountDownLatch(1);
         AtomicBoolean failed = new AtomicBoolean(false);
@@ -4023,12 +4025,11 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         final Position markDeleteBeforeRecover = c.getMarkDeletedPosition();
         final Position readPositionBeforeRecover = c.getReadPosition();
 
-        ManagedCursorInfo info = ManagedCursorInfo.newBuilder()
+        ManagedCursorInfo info = new ManagedCursorInfo()
                 .setCursorsLedgerId(c.getCursorLedger())
                 .setMarkDeleteLedgerId(markDeleteBeforeRecover.getLedgerId())
                 .setMarkDeleteEntryId(markDeleteBeforeRecover.getEntryId())
-                .setLastActive(0L)
-                .build();
+                .setLastActive(0L);
 
         CountDownLatch latch = new CountDownLatch(1);
         AtomicBoolean failed = new AtomicBoolean(false);
@@ -4666,8 +4667,10 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         Field field = ManagedLedgerImpl.class.getDeclaredField("ledgers");
         field.setAccessible(true);
 
-        ((ConcurrentSkipListMap<Long, MLDataFormats.ManagedLedgerInfo.LedgerInfo>) field.get(ledger))
-                .remove(position.getLedgerId());
+        @SuppressWarnings("unchecked")
+        ConcurrentSkipListMap<Long, ManagedLedgerInfo.LedgerInfo> ledgers =
+                (ConcurrentSkipListMap<Long, ManagedLedgerInfo.LedgerInfo>) field.get(ledger);
+        ledgers.remove(position.getLedgerId());
         field = ManagedCursorImpl.class.getDeclaredField("markDeletePosition");
         field.setAccessible(true);
         field.set(managedCursor, PositionFactory.create(position1.getLedgerId(), -1));
@@ -5657,8 +5660,8 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
             ml.addEntry(new byte[]{1, 2, 3, 4});
         }
         long ledger3 = ml.getCurrentLedger().getId();
-        MLDataFormats.ManagedLedgerInfo.LedgerInfo ledgerInfo1 = ml.getLedgersInfo().get(ledger1);
-        MLDataFormats.ManagedLedgerInfo.LedgerInfo ledgerInfo2 = ml.getLedgersInfo().get(ledger2);
+        ManagedLedgerInfo.LedgerInfo ledgerInfo1 = ml.getLedgersInfo().get(ledger1);
+        ManagedLedgerInfo.LedgerInfo ledgerInfo2 = ml.getLedgersInfo().get(ledger2);
         long average1 = ledgerInfo1.getSize() / ledgerInfo1.getEntries() + BOOKKEEPER_READ_OVERHEAD_PER_ENTRY;
         long average2 = ledgerInfo2.getSize() / ledgerInfo2.getEntries() + BOOKKEEPER_READ_OVERHEAD_PER_ENTRY;
         long average3 = ml.getCurrentLedgerSize() / ml.getCurrentLedgerEntries() + BOOKKEEPER_READ_OVERHEAD_PER_ENTRY;
@@ -5766,7 +5769,7 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         ledger.addEntry("entry-1".getBytes(Encoding));
         long invalidLedger = -1L;
         bk.setErrorCodeMap(invalidLedger, BKException.Code.BookieHandleNotAvailableException);
-        ManagedCursorInfo info = ManagedCursorInfo.newBuilder().setCursorsLedgerId(invalidLedger).build();
+        ManagedCursorInfo info = new ManagedCursorInfo().setCursorsLedgerId(invalidLedger);
         CountDownLatch latch = new CountDownLatch(1);
         MutableBoolean recovered = new MutableBoolean(false);
         VoidCallback callback = new VoidCallback() {
@@ -5805,7 +5808,7 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
 
                         @Override
                         public Iterator<org.apache.bookkeeper.client.api.LedgerEntry> iterator() {
-                            return EmptyIterator.INSTANCE;
+                            return EmptyIterator.emptyIterator();
                         }
 
                         @Override
@@ -6026,9 +6029,11 @@ public class ManagedCursorTest extends MockedBookKeeperTestCase {
         assertEquals(properties.get(propertyKey), lastIndex - 1);
     }
 
+    @SuppressWarnings("try")
     class TestPulsarMockBookKeeper extends PulsarMockBookKeeper {
         Map<Long, Integer> ledgerErrors = new HashMap<>();
 
+        @SuppressWarnings("try")
         public TestPulsarMockBookKeeper(OrderedExecutor orderedExecutor) throws Exception {
             super(orderedExecutor);
         }

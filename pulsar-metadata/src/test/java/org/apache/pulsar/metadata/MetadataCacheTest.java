@@ -34,6 +34,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
@@ -52,7 +53,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.common.policies.data.Policies;
-import org.apache.pulsar.common.util.BackoffBuilder;
+import org.apache.pulsar.common.util.Backoff;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.metadata.api.CacheGetResult;
@@ -69,7 +70,7 @@ import org.apache.pulsar.metadata.api.MetadataStoreFactory;
 import org.apache.pulsar.metadata.api.NotificationType;
 import org.apache.pulsar.metadata.api.Stat;
 import org.apache.pulsar.metadata.api.extended.CreateOption;
-import org.apache.pulsar.metadata.cache.impl.MetadataCacheImpl;
+import org.apache.pulsar.metadata.impl.DualMetadataCache;
 import org.apache.pulsar.metadata.impl.LocalMemoryMetadataStore;
 import org.awaitility.Awaitility;
 import org.mockito.stubbing.Answer;
@@ -188,9 +189,9 @@ public class MetadataCacheTest extends BaseMetadataStoreTest {
         @Cleanup
         MetadataStore store2 = MetadataStoreFactory.create(urlSupplier.get(), MetadataStoreConfig.builder().build());
 
-        MetadataCacheImpl<MyClass> objCache1 = (MetadataCacheImpl<MyClass>) store1.getMetadataCache(MyClass.class);
+        MetadataCache<MyClass> objCache1 = store1.getMetadataCache(MyClass.class);
 
-        MetadataCacheImpl<MyClass> objCache2 = (MetadataCacheImpl<MyClass>) store2.getMetadataCache(MyClass.class);
+        MetadataCache<MyClass> objCache2 = store2.getMetadataCache(MyClass.class);
         AtomicReference<MyClass> storeObj = new AtomicReference<MyClass>();
         store2.registerListener(n -> {
             if (n.getType() == NotificationType.Modified) {
@@ -519,23 +520,29 @@ public class MetadataCacheTest extends BaseMetadataStoreTest {
     }
 
     @Test(dataProvider = "zkImpls")
+    @SuppressWarnings("unchecked")
     public void readModifyUpdateOrCreateRetryTimeout(String provider, Supplier<String> urlSupplier) throws Exception {
         @Cleanup
         MetadataStore store = MetadataStoreFactory.create(urlSupplier.get(), MetadataStoreConfig.builder().build());
 
         MetadataCache<MyClass> cache = store.getMetadataCache(MyClass.class, MetadataCacheConfig.builder()
-                .retryBackoff(new BackoffBuilder()
-                        .setInitialTime(5, TimeUnit.MILLISECONDS)
-                        .setMax(1, TimeUnit.SECONDS)
-                        .setMandatoryStop(3, TimeUnit.SECONDS)).build());
+                .retryBackoff(Backoff.builder()
+                        .initialDelay(Duration.ofMillis(5))
+                        .maxBackoff(Duration.ofSeconds(1))
+                        .mandatoryStop(Duration.ofSeconds(3))).build());
 
-        Field metadataCacheField = cache.getClass().getDeclaredField("objCache");
+        MetadataCache<MyClass> cacheRef = cache;
+        if (cache instanceof DualMetadataCache<?> dc) {
+            cacheRef = (MetadataCache<MyClass>) dc.getMetadataCache().get();
+        }
+
+        Field metadataCacheField = cacheRef.getClass().getDeclaredField("objCache");
         metadataCacheField.setAccessible(true);
-        var objCache = metadataCacheField.get(cache);
+        var objCache = metadataCacheField.get(cacheRef);
         var spyObjCache = (AsyncLoadingCache<?, ?>) spy(objCache);
         doAnswer((Answer<CompletableFuture<MyClass>>) invocation -> CompletableFuture.failedFuture(
                 new MetadataStoreException.BadVersionException(""))).when(spyObjCache).get(any());
-        metadataCacheField.set(cache, spyObjCache);
+        metadataCacheField.set(cacheRef, spyObjCache);
 
         // Test three times to ensure that the retry works each time.
         for (int i = 0; i < 3; i++) {
@@ -699,10 +706,10 @@ public class MetadataCacheTest extends BaseMetadataStoreTest {
         final var config = MetadataCacheConfig.builder().build();
         assertEquals(config.getRefreshAfterWriteMillis(), TimeUnit.MINUTES.toMillis(5));
         assertEquals(config.getExpireAfterWriteMillis(), TimeUnit.MINUTES.toMillis(10));
-        final var backoff = config.getRetryBackoff().create();
-        assertEquals(backoff.getInitial(), 5);
-        assertEquals(backoff.getMax(), 3000);
-        assertEquals(backoff.getMandatoryStop(), 30_000);
+        final var backoff = config.getRetryBackoff().build();
+        assertEquals(backoff.getInitial(), Duration.ofMillis(5));
+        assertEquals(backoff.getMax(), Duration.ofSeconds(3));
+        assertEquals(backoff.getMandatoryStop(), Duration.ofSeconds(30));
     }
 
     @Test
@@ -710,36 +717,36 @@ public class MetadataCacheTest extends BaseMetadataStoreTest {
         final var config = MetadataCacheConfig.builder().retryBackoff(
                 MetadataCacheConfig.NO_RETRY_BACKOFF_BUILDER).build();
 
-        final var backoff = config.getRetryBackoff().create();
+        final var backoff = config.getRetryBackoff().build();
 
-        assertEquals(backoff.getInitial(), 0);
-        assertEquals(backoff.getMax(), 0);
-        assertEquals(backoff.getMandatoryStop(), 0);
+        assertEquals(backoff.getInitial(), Duration.ZERO);
+        assertEquals(backoff.getMax(), Duration.ZERO);
+        assertEquals(backoff.getMandatoryStop(), Duration.ZERO);
         assertTrue(backoff.isMandatoryStopMade());
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), 0);
-        assertEquals(backoff.next(), 0);
-        assertEquals(backoff.next(), 0);
-        assertEquals(backoff.next(), 0);
+        assertEquals(backoff.getFirstBackoffTime(), Instant.EPOCH);
+        assertEquals(backoff.next(), Duration.ZERO);
+        assertEquals(backoff.next(), Duration.ZERO);
+        assertEquals(backoff.next(), Duration.ZERO);
         assertTrue(backoff.isMandatoryStopMade());
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), 0);
+        assertEquals(backoff.getFirstBackoffTime(), Instant.EPOCH);
 
         backoff.reduceToHalf();
         assertTrue(backoff.isMandatoryStopMade());
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), 0);
-        assertEquals(backoff.next(), 0);
-        assertEquals(backoff.next(), 0);
-        assertEquals(backoff.next(), 0);
+        assertEquals(backoff.getFirstBackoffTime(), Instant.EPOCH);
+        assertEquals(backoff.next(), Duration.ZERO);
+        assertEquals(backoff.next(), Duration.ZERO);
+        assertEquals(backoff.next(), Duration.ZERO);
         assertTrue(backoff.isMandatoryStopMade());
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), 0);
+        assertEquals(backoff.getFirstBackoffTime(), Instant.EPOCH);
 
         backoff.reset();
         assertTrue(backoff.isMandatoryStopMade());
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), 0);
-        assertEquals(backoff.next(), 0);
-        assertEquals(backoff.next(), 0);
-        assertEquals(backoff.next(), 0);
+        assertEquals(backoff.getFirstBackoffTime(), Instant.EPOCH);
+        assertEquals(backoff.next(), Duration.ZERO);
+        assertEquals(backoff.next(), Duration.ZERO);
+        assertEquals(backoff.next(), Duration.ZERO);
         assertTrue(backoff.isMandatoryStopMade());
-        assertEquals(backoff.getFirstBackoffTimeInMillis(), 0);
+        assertEquals(backoff.getFirstBackoffTime(), Instant.EPOCH);
     }
 
     @Test

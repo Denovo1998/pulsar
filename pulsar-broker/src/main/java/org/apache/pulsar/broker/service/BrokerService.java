@@ -18,7 +18,6 @@
  */
 package org.apache.pulsar.broker.service;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.bookkeeper.mledger.ManagedLedgerConfig.PROPERTY_SOURCE_TOPIC_KEY;
@@ -115,6 +114,7 @@ import org.apache.pulsar.broker.intercept.ManagedLedgerInterceptorImpl;
 import org.apache.pulsar.broker.loadbalance.LoadManager;
 import org.apache.pulsar.broker.loadbalance.extensions.ExtensibleLoadManagerImpl;
 import org.apache.pulsar.broker.namespace.NamespaceService;
+import org.apache.pulsar.broker.namespace.TopicExistsInfo;
 import org.apache.pulsar.broker.resources.DynamicConfigurationResources;
 import org.apache.pulsar.broker.resources.LocalPoliciesResources;
 import org.apache.pulsar.broker.resources.NamespaceResources;
@@ -145,8 +145,10 @@ import org.apache.pulsar.broker.topiclistlimit.TopicListSizeResultCache;
 import org.apache.pulsar.broker.validator.BindAddressValidator;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminBuilder;
+import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.PulsarClient;
+import org.apache.pulsar.client.api.PulsarClientException;
 import org.apache.pulsar.client.api.SizeUnit;
 import org.apache.pulsar.client.impl.ClientBuilderImpl;
 import org.apache.pulsar.client.impl.conf.ClientConfigurationData;
@@ -159,13 +161,11 @@ import org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor;
 import org.apache.pulsar.common.intercept.BrokerEntryMetadataInterceptor;
 import org.apache.pulsar.common.intercept.BrokerEntryMetadataUtils;
 import org.apache.pulsar.common.intercept.ManagedLedgerPayloadProcessor;
-import org.apache.pulsar.common.naming.Constants;
 import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.SystemTopicNames;
 import org.apache.pulsar.common.naming.TopicDomain;
 import org.apache.pulsar.common.naming.TopicName;
-import org.apache.pulsar.common.naming.TopicVersion;
 import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
 import org.apache.pulsar.common.policies.data.AutoSubscriptionCreationOverride;
 import org.apache.pulsar.common.policies.data.AutoTopicCreationOverride;
@@ -494,11 +494,12 @@ public class BrokerService implements Closeable {
     }
 
     protected DispatchRateLimiterFactory createDispatchRateLimiterFactory(ServiceConfiguration config)
-            throws ClassNotFoundException, InstantiationException, IllegalAccessException {
+            throws Exception {
         String dispatchRateLimiterFactoryClassName = config.getDispatchRateLimiterFactoryClassName();
         if (isNotBlank(dispatchRateLimiterFactoryClassName)) {
             try {
-                return (DispatchRateLimiterFactory) Class.forName(dispatchRateLimiterFactoryClassName).newInstance();
+                return (DispatchRateLimiterFactory) Class.forName(dispatchRateLimiterFactoryClassName)
+                        .getDeclaredConstructor().newInstance();
             } catch (Exception e) {
                 log.warn("Failed to initialize dispatch rate limiter factory class {}",
                         dispatchRateLimiterFactoryClassName, e);
@@ -603,6 +604,7 @@ public class BrokerService implements Closeable {
         return topicStatsMap;
     }
 
+    @SuppressWarnings("deprecation")
     public void start() throws Exception {
         this.producerNameGenerator = new DistributedIdGenerator(pulsar.getCoordinationService(),
                 PRODUCER_NAME_GENERATOR_PATH, pulsar.getConfiguration().getClusterName());
@@ -697,7 +699,7 @@ public class BrokerService implements Closeable {
         if (!pulsar().isRunning()) {
             return CompletableFuture.completedFuture(null);
         }
-        return pulsar().runHealthCheck(TopicVersion.V2, null).thenAccept(__ -> {
+        return pulsar().runHealthCheck(null).thenAccept(__ -> {
             this.pulsarStats.getBrokerOperabilityMetrics().recordHealthCheckStatusSuccess();
         }).exceptionally(ex -> {
             this.pulsarStats.getBrokerOperabilityMetrics().recordHealthCheckStatusFail();
@@ -1490,6 +1492,7 @@ public class BrokerService implements Closeable {
         return topicFuture;
     }
 
+    @SuppressWarnings("deprecation")
     public PulsarClient getReplicationClient(String cluster, Optional<ClusterData> clusterDataOp) {
         PulsarClient client = replicationClients.get(cluster);
         if (client != null) {
@@ -2011,7 +2014,9 @@ public class BrokerService implements Closeable {
     }
 
     public CompletableFuture<ManagedLedgerConfig> getManagedLedgerConfig(@NonNull TopicName topicName) {
-        requireNonNull(topicName);
+        if (topicName == null) {
+            return FutureUtil.failedFuture(new NullPointerException("topicName"));
+        }
         NamespaceName namespace = topicName.getNamespaceObject();
         ServiceConfiguration serviceConfig = pulsar.getConfiguration();
 
@@ -2737,6 +2742,7 @@ public class BrokerService implements Closeable {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private void configValueChanged(String configKey, String newValueStr) {
         ConfigField configFieldWrapper = dynamicConfigurationMap.get(configKey);
         if (configFieldWrapper == null) {
@@ -2792,9 +2798,6 @@ public class BrokerService implements Closeable {
      * @param namespace
      */
     private void unloadDeletedReplNamespace(Policies data, NamespaceName namespace) {
-        if (!namespace.isGlobal()) {
-            return;
-        }
         final String localCluster = this.pulsar.getConfiguration().getClusterName();
         if (pulsar.getBrokerService().isCurrentClusterAllowed(namespace, data)) {
             return;
@@ -3390,20 +3393,32 @@ public class BrokerService implements Closeable {
                             return CompletableFuture.completedFuture(new PartitionedTopicMetadata(0));
                         }
 
-                        // Allow auto create non-partitioned topic.
-                        boolean autoCreatePartitionedTopic = pulsar.getBrokerService()
-                                .isDefaultTopicTypePartitioned(topicName, policies);
-                        if (!autoCreatePartitionedTopic || topicName.isPartitioned()) {
-                            return CompletableFuture.completedFuture(new PartitionedTopicMetadata(0));
-                        }
+                        return getRemotePartitionedTopicMetadataForAutoCreation(topicName, policies)
+                            .thenCompose(remoteTopicExistsInfo -> {
+                                // If remote topic exists, prioritize topic shape from remote clusters.
+                                if (remoteTopicExistsInfo.isExists()) {
+                                    if (remoteTopicExistsInfo.getTopicType() == TopicType.PARTITIONED) {
+                                        return createPartitionedTopicMetadataAsync(topicName,
+                                            remoteTopicExistsInfo.getPartitions());
+                                    }
+                                    return CompletableFuture.completedFuture(new PartitionedTopicMetadata(0));
+                                }
 
-                        // Create partitioned metadata.
-                        return pulsar.getBrokerService().createDefaultPartitionedTopicAsync(topicName, policies)
-                            .exceptionallyCompose(ex -> {
+                                // Allow auto create non-partitioned topic.
+                                boolean autoCreatePartitionedTopic = pulsar.getBrokerService()
+                                        .isDefaultTopicTypePartitioned(topicName, policies);
+                                if (!autoCreatePartitionedTopic || topicName.isPartitioned()) {
+                                    return CompletableFuture.completedFuture(new PartitionedTopicMetadata(0));
+                                }
+
+                                // Create partitioned metadata.
+                                return pulsar.getBrokerService().createDefaultPartitionedTopicAsync(topicName,
+                                        policies);
+                            }).exceptionallyCompose(ex -> {
                                 // The partitioned topic might be created concurrently.
                                 if (ex.getCause() instanceof MetadataStoreException.AlreadyExistsException) {
-                                    log.info("[{}] The partitioned topic is already created, try to refresh the cache"
-                                            + " and read again.", topicName);
+                                    log.info("[{}] The partitioned topic is already created, try to refresh "
+                                            + "the cache and read again.", topicName);
                                     CompletableFuture<PartitionedTopicMetadata> recheckFuture =
                                             fetchPartitionedTopicMetadataAsync(topicName, true);
                                     recheckFuture.exceptionally(ex2 -> {
@@ -3432,15 +3447,25 @@ public class BrokerService implements Closeable {
     private CompletableFuture<PartitionedTopicMetadata> createDefaultPartitionedTopicAsync(TopicName topicName,
                                                                                         Optional<Policies> policies) {
         final int defaultNumPartitions = pulsar.getBrokerService().getDefaultNumPartitions(topicName, policies);
+        return createPartitionedTopicMetadataAsync(topicName, defaultNumPartitions);
+    }
+
+    private CompletableFuture<PartitionedTopicMetadata> createPartitionedTopicMetadataAsync(TopicName topicName,
+                                                                                            int numPartitions) {
         final int maxPartitions = pulsar().getConfig().getMaxNumPartitionsPerPartitionedTopic();
-        checkArgument(defaultNumPartitions > 0,
-                "Default number of partitions should be more than 0");
-        checkArgument(maxPartitions <= 0 || defaultNumPartitions <= maxPartitions,
-                "Number of partitions should be less than or equal to " + maxPartitions);
+        if (numPartitions <= 0) {
+            return FutureUtil.failedFuture(
+                    new IllegalArgumentException("Default number of partitions should be more than 0"));
+        }
+        if (maxPartitions > 0 && numPartitions > maxPartitions) {
+            return FutureUtil.failedFuture(
+                    new IllegalArgumentException("Number of partitions should be less than or equal to "
+                            + maxPartitions));
+        }
 
-        PartitionedTopicMetadata configMetadata = new PartitionedTopicMetadata(defaultNumPartitions);
+        PartitionedTopicMetadata configMetadata = new PartitionedTopicMetadata(numPartitions);
 
-        return checkMaxTopicsPerNamespace(topicName, defaultNumPartitions, true)
+        return checkMaxTopicsPerNamespace(topicName, numPartitions, true)
                 .thenCompose(__ -> {
                     PartitionedTopicResources partitionResources = pulsar.getPulsarResources().getNamespaceResources()
                             .getPartitionedTopicResources();
@@ -3450,6 +3475,79 @@ public class BrokerService implements Closeable {
                                 return configMetadata;
                             });
                 });
+    }
+
+    private CompletableFuture<TopicExistsInfo> getRemotePartitionedTopicMetadataForAutoCreation(
+            TopicName topicName, Optional<Policies> policies) {
+        if (!pulsar.getConfig().isCreateTopicToRemoteClusterForReplication()) {
+            return CompletableFuture.completedFuture(TopicExistsInfo.newTopicNotExists());
+        }
+        if (topicName.isPartitioned() || !topicName.isPersistent() || policies.isEmpty()) {
+            return CompletableFuture.completedFuture(TopicExistsInfo.newTopicNotExists());
+        }
+        Set<String> replicationClusters = policies.get().replication_clusters;
+        if (replicationClusters == null || replicationClusters.isEmpty()) {
+            return CompletableFuture.completedFuture(TopicExistsInfo.newTopicNotExists());
+        }
+        String localCluster = pulsar.getConfiguration().getClusterName();
+        if (!replicationClusters.contains(localCluster) || replicationClusters.size() <= 1) {
+            return CompletableFuture.completedFuture(TopicExistsInfo.newTopicNotExists());
+        }
+        List<String> remoteClusters = replicationClusters.stream()
+                .filter(cluster -> !cluster.equals(localCluster))
+                .sorted()
+                .toList();
+        return findRemoteTopicMetadataForAutoCreation(topicName, remoteClusters, 0, null);
+    }
+
+    private CompletableFuture<TopicExistsInfo> findRemoteTopicMetadataForAutoCreation(
+            TopicName topicName, List<String> remoteClusters, int index, Throwable errOccurred) {
+        if (index >= remoteClusters.size()) {
+            if (errOccurred != null) {
+                log.error("[{}] Failed to check remote topic partitioned metadata on cluster {}. Fallback to "
+                    + "default auto topic creation policy.",
+                    topicName, remoteClusters, errOccurred);
+            }
+            return CompletableFuture.completedFuture(TopicExistsInfo.newTopicNotExists());
+        }
+        final String remoteCluster = remoteClusters.get(index);
+        return pulsar.getPulsarResources().getClusterResources().getClusterAsync(remoteCluster)
+            .thenCompose(clusterData -> {
+                if (clusterData.isEmpty()) {
+                    log.warn("[{}] Skip checking remote cluster {} because cluster data is missing",
+                            topicName, remoteCluster);
+                    return findRemoteTopicMetadataForAutoCreation(topicName, remoteClusters, index + 1, null);
+                }
+                PulsarClient client = getReplicationClient(remoteCluster, clusterData);
+                CompletableFuture<TopicExistsInfo> future = new CompletableFuture<>();
+                client.getPartitionsForTopic(topicName.toString(), false).handle((topics, t) -> {
+                    if (t != null) {
+                        Throwable actEx = FutureUtil.unwrapCompletionException(t);
+                        if (actEx instanceof PulsarClientException.NotFoundException
+                            | actEx instanceof PulsarClientException.TopicDoesNotExistException
+                            | actEx instanceof PulsarAdminException.NotFoundException) {
+                            future.complete(TopicExistsInfo.newTopicNotExists());
+                        } else {
+                            FutureUtil.completeAfter(future,
+                                findRemoteTopicMetadataForAutoCreation(topicName, remoteClusters, index + 1, actEx));
+                        }
+                        return null;
+                    }
+                    if (topics.isEmpty()) {
+                        future.complete(TopicExistsInfo.newTopicNotExists());
+                    } else if (topics.size() == 1 && !TopicName.get(topics.get(0)).isPartitioned()) {
+                        future.complete(TopicExistsInfo.newNonPartitionedTopicExists());
+                    } else {
+                        int maxPartitionNum = 0;
+                        for (String topic : topics) {
+                            maxPartitionNum = Math.max(maxPartitionNum, TopicName.get(topic).getPartitionIndex());
+                        }
+                        future.complete(TopicExistsInfo.newPartitionedTopicExists(maxPartitionNum + 1));
+                    }
+                    return null;
+                });
+                return future;
+            });
     }
 
     public CompletableFuture<PartitionedTopicMetadata> fetchPartitionedTopicMetadataAsync(TopicName topicName) {
@@ -3464,6 +3562,11 @@ public class BrokerService implements Closeable {
                     // if the partitioned topic is not found in metadata, then the topic is not partitioned
                     return metadata.orElseGet(() -> new PartitionedTopicMetadata());
                 });
+    }
+
+    public PartitionedTopicMetadata fetchPartitionedTopicMetadataIfCachedAndAsyncLoad(TopicName topicName) {
+        return pulsar.getPulsarResources().getNamespaceResources().getPartitionedTopicResources()
+                .getPartitionedTopicMetadataIfCacheAndAsyncLoad(topicName).orElseGet(PartitionedTopicMetadata::new);
     }
 
     public OrderedExecutor getTopicOrderedExecutor() {
@@ -3678,13 +3781,6 @@ public class BrokerService implements Closeable {
             return CompletableFuture.completedFuture(true);
         }
 
-        //If 'allowAutoTopicCreation' is true, and the name of the topic contains 'cluster',
-        //the topic cannot be automatically created.
-        if (!pulsar.getConfiguration().isAllowAutoTopicCreationWithLegacyNamingScheme()
-                && StringUtils.isNotBlank(topicName.getCluster())) {
-            return CompletableFuture.completedFuture(false);
-        }
-
         final boolean allowed;
         AutoTopicCreationOverride autoTopicCreationOverride = getAutoTopicCreationOverride(topicName, policies);
         if (autoTopicCreationOverride != null) {
@@ -3746,7 +3842,9 @@ public class BrokerService implements Closeable {
     }
 
     public @NonNull CompletableFuture<Boolean> isAllowAutoSubscriptionCreationAsync(@NonNull TopicName tpName) {
-        requireNonNull(tpName);
+        if (tpName == null) {
+            return FutureUtil.failedFuture(new NullPointerException("tpName"));
+        }
         // Policies priority: topic level -> namespace level -> broker level
         if (ExtensibleLoadManagerImpl.isInternalTopic(tpName.toString())) {
             return CompletableFuture.completedFuture(true);
@@ -3904,7 +4002,8 @@ public class BrokerService implements Closeable {
         String topicFactoryClassName = pulsar.getConfig().getTopicFactoryClassName();
         if (StringUtils.isNotBlank(topicFactoryClassName)) {
             try {
-                return (TopicFactory) Class.forName(topicFactoryClassName).newInstance();
+                return (TopicFactory) Class.forName(topicFactoryClassName)
+                        .getDeclaredConstructor().newInstance();
             } catch (Exception e) {
                 log.warn("Failed to initialize topic factory class {}", topicFactoryClassName, e);
                 throw e;
@@ -3927,10 +4026,6 @@ public class BrokerService implements Closeable {
      * means the default replication clusters for the topics under the namespace.
      */
     public boolean isCurrentClusterAllowed(NamespaceName nsName, Policies nsPolicies) {
-        // Compatibility with v1 version namespace.
-        if (Constants.GLOBAL_CLUSTER.equalsIgnoreCase(nsName.getCluster())) {
-            return nsPolicies.replication_clusters.contains(pulsar.getConfig().getClusterName());
-        }
         // If allowed clusters has been set, only check allowed clusters.
         if (!nsPolicies.allowed_clusters.isEmpty()) {
             return nsPolicies.allowed_clusters.contains(pulsar.getConfig().getClusterName());
@@ -3940,10 +4035,6 @@ public class BrokerService implements Closeable {
     }
 
     public void setCurrentClusterAllowedIfNoClusterIsAllowed(NamespaceName nsName, Policies nsPolicies) {
-        // Compatibility with v1 version namespace.
-        if (!nsName.isV2()) {
-            return;
-        }
         if (nsPolicies.replication_clusters.contains(pulsar.getConfig().getClusterName())
                 || nsPolicies.allowed_clusters.contains(pulsar.getConfig().getClusterName())) {
             return;

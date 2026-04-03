@@ -130,7 +130,7 @@ public class ClientDeduplicationFailureTest {
         log.info("--- Shutting down ---");
         if (pulsarClient != null) {
             pulsarClient.close();
-            pulsar = null;
+            pulsarClient = null;
         }
         if (admin != null) {
             admin.close();
@@ -209,7 +209,7 @@ public class ClientDeduplicationFailureTest {
         final String sourceTopic = "persistent://" + replNamespace + "/my-topic1";
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
         admin.namespaces().setDeduplicationStatus(replNamespace, true);
         admin.namespaces().setRetention(replNamespace, new RetentionPolicies(-1, -1));
         Producer<String> producer = pulsarClient.newProducer(Schema.STRING)
@@ -282,6 +282,7 @@ public class ClientDeduplicationFailureTest {
         assertNotNull(prevMessage);
         assertEquals(prevMessage.getSequenceId(), producerThread.getLastSeqId());
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 300000)
     public void testClientDeduplicationWithBkFailure() throws  Exception {
@@ -295,7 +296,7 @@ public class ClientDeduplicationFailureTest {
         final List<Message<String>> msgRecvd = new LinkedList<>();
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
         admin.namespaces().setDeduplicationStatus(replNamespace, true);
         Producer<String> producer = pulsarClient.newProducer(Schema.STRING).topic(sourceTopic)
                 .producerName("test-producer-1").create();
