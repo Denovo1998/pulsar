@@ -18,14 +18,12 @@
  */
 package org.apache.pulsar.broker.delayed;
 
-import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 
 public class NoopDelayedDeliveryContext implements DelayedDeliveryContext {
 
     private final String name;
     private final ManagedCursor cursor;
-    private final AtomicInteger triggerCount = new AtomicInteger();
     private final Object triggerLock = new Object();
 
     public NoopDelayedDeliveryContext(String name, ManagedCursor cursor) {
@@ -51,10 +49,5 @@ public class NoopDelayedDeliveryContext implements DelayedDeliveryContext {
     @Override
     public void triggerReadMoreEntries() {
         // no-op; for tests/JMH
-        triggerCount.incrementAndGet();
-    }
-
-    public int getTriggerCount() {
-        return triggerCount.get();
     }
 }
