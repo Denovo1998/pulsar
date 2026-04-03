@@ -106,16 +106,6 @@ public class BucketDelayedDeliveryTrackerFactory implements DelayedDeliveryTrack
                 delayedDeliveryMaxIndexesPerBucketSnapshotSegment, delayedDeliveryMaxNumBuckets);
     }
 
-    @VisibleForTesting
-    BucketDelayedDeliveryTracker newTracker0(String dispatcherName, ManagedCursor cursor)
-            throws RecoverDelayedDeliveryTrackerException {
-        DelayedDeliveryContext context = new NoopDelayedDeliveryContext(dispatcherName, cursor);
-        return new BucketDelayedDeliveryTracker(context, timer, tickTimeMillis,
-                isDelayedDeliveryDeliverAtTimeStrict, bucketSnapshotStorage, delayedDeliveryMinIndexCountPerBucket,
-                TimeUnit.SECONDS.toMillis(delayedDeliveryMaxTimeStepPerBucketSnapshotSegmentSeconds),
-                delayedDeliveryMaxIndexesPerBucketSnapshotSegment, delayedDeliveryMaxNumBuckets);
-    }
-
     /**
      * Clean up residual snapshot data.
      * If tracker has not been created or has been closed, then we can't clean up the snapshot with `tracker.clear`,
