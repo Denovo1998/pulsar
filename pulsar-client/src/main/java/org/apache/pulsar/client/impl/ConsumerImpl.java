@@ -39,6 +39,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -130,13 +131,12 @@ import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.schema.SchemaType;
 import org.apache.pulsar.common.util.Backoff;
-import org.apache.pulsar.common.util.BackoffBuilder;
 import org.apache.pulsar.common.util.CompletableFutureCancellationHandler;
 import org.apache.pulsar.common.util.ExceptionHandler;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.SafeCollectionUtils;
 import org.apache.pulsar.common.util.collections.BitSetRecyclable;
-import org.apache.pulsar.common.util.collections.ConcurrentBitSetRecyclable;
+import org.apache.pulsar.common.util.collections.ConcurrentBitSet;
 import org.apache.pulsar.common.util.collections.GrowableArrayBlockingQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -189,7 +189,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
 
     private volatile boolean hasReachedEndOfTopic;
 
-    private final MessageCrypto msgCrypto;
+    private final MessageCrypto<?, ?> msgCrypto;
 
     private final Map<String, String> metadata;
 
@@ -349,7 +349,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 this.msgCrypto = conf.getMessageCrypto();
             } else {
                 // default to use MessageCryptoBc;
-                MessageCrypto msgCryptoBc;
+                MessageCrypto<?, ?> msgCryptoBc;
                 try {
                     msgCryptoBc = new MessageCryptoBc(
                             String.format("[%s] [%s]", topic, subscription),
@@ -371,12 +371,11 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         }
 
         this.connectionHandler = new ConnectionHandler(this,
-                new BackoffBuilder()
-                        .setInitialTime(client.getConfiguration().getInitialBackoffIntervalNanos(),
-                                TimeUnit.NANOSECONDS)
-                        .setMax(client.getConfiguration().getMaxBackoffIntervalNanos(), TimeUnit.NANOSECONDS)
-                        .setMandatoryStop(0, TimeUnit.MILLISECONDS)
-                        .create(),
+                Backoff.builder()
+                        .initialDelay(Duration.ofNanos(client.getConfiguration()
+                                .getInitialBackoffIntervalNanos()))
+                        .maxBackoff(Duration.ofNanos(client.getConfiguration().getMaxBackoffIntervalNanos()))
+                        .build(),
                 this);
 
         this.topicName = TopicName.get(topic);
@@ -790,6 +789,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         return result;
     }
 
+    @SuppressWarnings("deprecation")
     private SortedMap<String, String> getPropertiesMap(Message<?> message,
                                                        String originMessageIdStr,
                                                        String originTopicNameStr) {
@@ -1508,7 +1508,6 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         // and return undecrypted payload
         if (isMessageUndecryptable || (numMessages == 1 && !msgMetadata.hasNumMessagesInBatch())) {
 
-            // right now, chunked messages are only supported by non-shared subscription
             if (isChunkedMessage) {
                 uncompressedPayload = processMessageChunk(uncompressedPayload, msgMetadata, msgId, messageId, cnx);
                 if (uncompressedPayload == null) {
@@ -2015,6 +2014,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         }
     }
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private DecryptResult decryptPayloadIfNeeded(MessageIdData messageId, int redeliveryCount,
                                                  MessageMetadata msgMetadata,
                                                  ByteBuf payload, ClientCnx currentCnx) {
@@ -2031,7 +2031,8 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         int maxDecryptedSize = msgCrypto.getMaxOutputSize(payload.readableBytes());
         ByteBuf decryptedData = PulsarByteBufAllocator.DEFAULT.buffer(maxDecryptedSize);
         ByteBuffer nioDecryptedData = decryptedData.nioBuffer(0, maxDecryptedSize);
-        if (msgCrypto.decrypt(() -> msgMetadata, payload.nioBuffer(), nioDecryptedData, conf.getCryptoKeyReader())) {
+        if (((MessageCrypto) msgCrypto).decrypt(() -> msgMetadata, payload.nioBuffer(),
+                nioDecryptedData, conf.getCryptoKeyReader())) {
             decryptedData.writerIndex(nioDecryptedData.limit());
             return DecryptResult.success(decryptedData);
         }
@@ -2327,6 +2328,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 futures.stream().map(CompletableFuture::join).filter(Objects::nonNull).collect(Collectors.toList()));
     }
 
+    @SuppressWarnings("unchecked")
     private CompletableFuture<Boolean> processPossibleToDLQ(MessageIdAdv messageId) {
         List<MessageImpl<T>> deadLetterMessages = null;
         if (possibleSendToDeadLetterTopicMessages != null) {
@@ -2406,6 +2408,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         }
     }
 
+    @SuppressWarnings("unchecked")
     private CompletableFuture<Producer<byte[]>> initDeadLetterProducerIfNeeded() {
         CompletableFuture<Producer<byte[]>> p = deadLetterProducer;
         if (p == null || p.isCompletedExceptionally()) {
@@ -2423,7 +2426,8 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                                         .topic(this.deadLetterPolicy.getDeadLetterTopic())
                                         .producerName(
                                                 String.format("%s-%s-%s-%s-DLQ", this.topicName, this.subscription,
-                                                        this.consumerName, RandomStringUtils.randomAlphanumeric(5)))
+                                                        this.consumerName,
+                                                        RandomStringUtils.insecure().nextAlphanumeric(5)))
                                         .blockIfQueueFull(false)
                                         .enableBatching(false)
                                         .enableChunking(true);
@@ -2460,15 +2464,12 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             return producerSupplier.get();
         } else {
             // calculate backoff time for given failure count
-            Backoff backoff = new BackoffBuilder()
-                    .setInitialTime(100, TimeUnit.MILLISECONDS)
-                    .setMandatoryStop(client.getConfiguration().getOperationTimeoutMs() * 2,
-                            TimeUnit.MILLISECONDS)
-                    .setMax(1, TimeUnit.MINUTES)
-                    .create();
+            Backoff backoff = Backoff.builder()
+                    .mandatoryStop(Duration.ofMillis(client.getConfiguration().getOperationTimeoutMs() * 2))
+                    .build();
             long backoffTimeMillis = 0;
             for (int i = 0; i < failureCount; i++) {
-                backoffTimeMillis = backoff.next();
+                backoffTimeMillis = backoff.next().toMillis();
             }
             CompletableFuture<Producer<byte[]>> newProducer = new CompletableFuture<>();
             ScheduledExecutorService executor =
@@ -2570,11 +2571,9 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
     private CompletableFuture<Void> seekAsyncInternal(long requestId, ByteBuf seek, MessageId seekId,
                                                       Long seekTimestamp, String seekBy) {
         AtomicLong opTimeoutMs = new AtomicLong(client.getConfiguration().getOperationTimeoutMs());
-        Backoff backoff = new BackoffBuilder()
-                .setInitialTime(100, TimeUnit.MILLISECONDS)
-                .setMax(opTimeoutMs.get() * 2, TimeUnit.MILLISECONDS)
-                .setMandatoryStop(0, TimeUnit.MILLISECONDS)
-                .create();
+        Backoff backoff = Backoff.builder()
+                .maxBackoff(Duration.ofMillis(opTimeoutMs.get() * 2))
+                .build();
 
         if (!seekStatus.compareAndSet(SeekStatus.NOT_STARTED, SeekStatus.IN_PROGRESS)) {
             final String message = String.format(
@@ -2632,7 +2631,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 return null;
             });
         } else {
-            long nextDelay = Math.min(backoff.next(), remainingTime.get());
+            long nextDelay = Math.min(backoff.next().toMillis(), remainingTime.get());
             if (nextDelay <= 0) {
                 failSeek(
                         new PulsarClientException.TimeoutException(
@@ -2839,11 +2838,9 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 }
 
         AtomicLong opTimeoutMs = new AtomicLong(client.getConfiguration().getOperationTimeoutMs());
-        Backoff backoff = new BackoffBuilder()
-                .setInitialTime(100, TimeUnit.MILLISECONDS)
-                .setMax(opTimeoutMs.get() * 2, TimeUnit.MILLISECONDS)
-                .setMandatoryStop(0, TimeUnit.MILLISECONDS)
-                .create();
+        Backoff backoff = Backoff.builder()
+                .maxBackoff(Duration.ofMillis(opTimeoutMs.get() * 2))
+                .build();
 
         CompletableFuture<GetLastMessageIdResponse> getLastMessageIdFuture = new CompletableFuture<>();
 
@@ -2904,7 +2901,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 future.completeExceptionally(failReason);
                 return;
             }
-            long nextDelay = Math.min(backoff.next(), remainingTime.get());
+            long nextDelay = Math.min(backoff.next().toMillis(), remainingTime.get());
             if (nextDelay <= 0) {
                 future.completeExceptionally(
                     new PulsarClientException.TimeoutException(
@@ -3187,7 +3184,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
             } else {
                 if (Commands.peerSupportsMultiMessageAcknowledgment(
                         getClientCnx().getRemoteEndpointProtocolVersion())) {
-                    List<Triple<Long, Long, ConcurrentBitSetRecyclable>> entriesToAck =
+                    List<Triple<Long, Long, ConcurrentBitSet>> entriesToAck =
                             new ArrayList<>(chunkMsgIds.length);
                     for (MessageIdImpl cMsgId : chunkMsgIds) {
                         if (cMsgId != null && chunkMsgIds.length > 1) {
@@ -3225,7 +3222,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
     }
 
     private ByteBuf newMultiTransactionMessageAck(long consumerId, TxnID txnID,
-                                                  List<Triple<Long, Long, ConcurrentBitSetRecyclable>> entries,
+                                                  List<Triple<Long, Long, ConcurrentBitSet>> entries,
                                                   long requestID) {
         BaseCommand cmd = newMultiMessageAckCommon(entries);
         cmd.getAck()
@@ -3244,7 +3241,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         }
     };
 
-    private static BaseCommand newMultiMessageAckCommon(List<Triple<Long, Long, ConcurrentBitSetRecyclable>> entries) {
+    private static BaseCommand newMultiMessageAckCommon(List<Triple<Long, Long, ConcurrentBitSet>> entries) {
         BaseCommand cmd = LOCAL_BASE_COMMAND.get()
                 .clear()
                 .setType(BaseCommand.Type.ACK);
@@ -3253,7 +3250,7 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
         for (int i = 0; i < entriesCount; i++) {
             long ledgerId = entries.get(i).getLeft();
             long entryId = entries.get(i).getMiddle();
-            ConcurrentBitSetRecyclable bitSet = entries.get(i).getRight();
+            ConcurrentBitSet bitSet = entries.get(i).getRight();
             MessageIdData msgId = ack.addMessageId()
                     .setLedgerId(ledgerId)
                     .setEntryId(entryId);
@@ -3262,7 +3259,6 @@ public class ConsumerImpl<T> extends ConsumerBase<T> implements ConnectionHandle
                 for (int j = 0; j < ackSet.length; j++) {
                     msgId.addAckSet(ackSet[j]);
                 }
-                bitSet.recycle();
             }
         }
 

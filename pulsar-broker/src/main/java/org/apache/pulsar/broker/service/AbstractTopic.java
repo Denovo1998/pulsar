@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -59,11 +60,13 @@ import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.resourcegroup.ResourceGroup;
 import org.apache.pulsar.broker.resourcegroup.ResourceGroupPublishLimiter;
+import org.apache.pulsar.broker.resources.NamespaceResources;
 import org.apache.pulsar.broker.service.BrokerServiceException.ConsumerBusyException;
 import org.apache.pulsar.broker.service.BrokerServiceException.ProducerBusyException;
 import org.apache.pulsar.broker.service.BrokerServiceException.ProducerFencedException;
 import org.apache.pulsar.broker.service.BrokerServiceException.TopicMigratedException;
 import org.apache.pulsar.broker.service.BrokerServiceException.TopicTerminatedException;
+import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.service.plugin.EntryFilter;
 import org.apache.pulsar.broker.service.schema.SchemaRegistryService;
 import org.apache.pulsar.broker.service.schema.exceptions.IncompatibleSchemaException;
@@ -71,6 +74,7 @@ import org.apache.pulsar.broker.service.schema.exceptions.SchemaException;
 import org.apache.pulsar.common.api.proto.CommandSubscribe.SubType;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.partition.PartitionedTopicMetadata;
 import org.apache.pulsar.common.policies.data.BacklogQuota;
 import org.apache.pulsar.common.policies.data.ClusterPolicies.ClusterUrl;
 import org.apache.pulsar.common.policies.data.DelayedDeliveryPolicies;
@@ -281,6 +285,8 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener {
                 isGlobalPolicies);
         topicPolicies.getMessageTTLInSeconds().updateTopicValue(normalizeValue(data.getMessageTTLInSeconds()),
                 isGlobalPolicies);
+        topicPolicies.getSubscriptionExpirationTimeInMinutes()
+                .updateTopicValue(normalizeValue(data.getSubscriptionExpirationTimeInMinutes()), isGlobalPolicies);
         topicPolicies.getPublishRate().updateTopicValue(PublishRate.normalize(data.getPublishRate()), isGlobalPolicies);
         topicPolicies.getDelayedDeliveryEnabled().updateTopicValue(data.getDelayedDeliveryEnabled(), isGlobalPolicies);
         topicPolicies.getReplicatorDispatchRate().updateTopicValue(
@@ -324,6 +330,8 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener {
                 .updateNamespaceValue(normalizeValue(namespacePolicies.max_unacked_messages_per_subscription));
         topicPolicies.getMessageTTLInSeconds()
                 .updateNamespaceValue(normalizeValue(namespacePolicies.message_ttl_in_seconds));
+        topicPolicies.getSubscriptionExpirationTimeInMinutes()
+                .updateNamespaceValue(normalizeValue(namespacePolicies.subscription_expiration_time_minutes));
         topicPolicies.getMaxSubscriptionsPerTopic()
                 .updateNamespaceValue(normalizeValue(namespacePolicies.max_subscriptions_per_topic));
         topicPolicies.getMaxProducersPerTopic()
@@ -369,6 +377,7 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener {
         return policyValue != null && policyValue < 0 ? null : policyValue;
     }
 
+    @SuppressWarnings("deprecation")
     private void updateNamespaceDispatchRate(Policies namespacePolicies, String cluster) {
         DispatchRateImpl dispatchRate = namespacePolicies.topicDispatchRate.get(cluster);
         if (dispatchRate == null) {
@@ -392,6 +401,7 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener {
             .updateNamespaceValue(DispatchRateImpl.normalize(namespacePolicies.replicatorDispatchRate.get(cluster)));
     }
 
+    @SuppressWarnings("deprecation")
     private void updateSchemaCompatibilityStrategyNamespaceValue(Policies namespacePolicies){
         if (isSystemTopic()) {
             return;
@@ -444,6 +454,8 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener {
 
         topicPolicies.getTopicMaxMessageSize().updateBrokerValue(config.getMaxMessageSize());
         topicPolicies.getMessageTTLInSeconds().updateBrokerValue(config.getTtlDurationDefaultInSeconds());
+        topicPolicies.getSubscriptionExpirationTimeInMinutes()
+                .updateBrokerValue(config.getSubscriptionExpirationTimeMinutes());
         topicPolicies.getPublishRate().updateBrokerValue(publishRateInBroker(config));
         topicPolicies.getDelayedDeliveryEnabled().updateBrokerValue(config.isDelayedDeliveryEnabled());
         topicPolicies.getDelayedDeliveryTickTimeMillis().updateBrokerValue(config.getDelayedDeliveryTickTimeMillis());
@@ -1382,5 +1394,63 @@ public abstract class AbstractTopic implements Topic, TopicPolicyListener {
     public boolean isSystemCursor(String sub) {
         return COMPACTION_SUBSCRIPTION.equals(sub)
                 || (additionalSystemCursorNames != null && additionalSystemCursorNames.contains(sub));
+    }
+
+    public static Map<String, String> getCustomMetricLabelsMap(PulsarService pulsar, TopicName topicName) {
+        Map<String, String> properties = fetchTopicPropertiesFromCache(pulsar, topicName);
+        if (MapUtils.isEmpty(properties)) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> customMetricLabels = new HashMap<>();
+        Set<String> allowedCustomLabelKeys = getAllowedTopicPropertyKeysForMetrics(pulsar, topicName);
+        for (Map.Entry<String, String> entry : properties.entrySet()) {
+            if (allowedCustomLabelKeys.contains(entry.getKey())) {
+                customMetricLabels.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return customMetricLabels;
+    }
+
+    private static Set<String> getAllowedTopicPropertyKeysForMetrics(PulsarService pulsar, TopicName topicName) {
+        Set<String> allowedKeys = pulsar.getConfiguration().getAllowedTopicPropertyKeysForMetrics();
+
+        NamespaceResources namespaceResources = pulsar.getPulsarResources().getNamespaceResources();
+        NamespaceName namespaceName = topicName.getNamespaceObject();
+        Optional<Policies> policies = namespaceResources.getPoliciesIfCachedAndAsyncLoad(namespaceName);
+        if (policies.isPresent() && policies.get().allowed_topic_property_keys_for_metrics != null) {
+            allowedKeys = policies.get().allowed_topic_property_keys_for_metrics;
+        }
+
+        return allowedKeys;
+    }
+
+    private static Map<String, String> fetchTopicPropertiesFromCache(PulsarService pulsarService, TopicName topicName) {
+        // Only persistent topics have properties
+        if (!topicName.isPersistent()) {
+            return Collections.emptyMap();
+        }
+
+        if (!topicName.isPartitioned()) {
+            return getNonPartitionedPropertiesAsync(pulsarService, topicName);
+        }
+        TopicName partitionedTopicName = TopicName.getPartitionedTopicName(topicName.toString());
+        PartitionedTopicMetadata metadata = pulsarService.getBrokerService()
+            .fetchPartitionedTopicMetadataIfCachedAndAsyncLoad(partitionedTopicName);
+        if (metadata.partitions == 0) {
+            return getNonPartitionedPropertiesAsync(pulsarService, topicName);
+        } else {
+            return metadata.properties;
+        }
+    }
+
+    private static Map<String, String> getNonPartitionedPropertiesAsync(PulsarService pulsarService,
+                                                                        TopicName topicName) {
+        Optional<Topic> topicOptional = pulsarService.getBrokerService().getTopicIfExists(topicName.toString())
+            .getNow(Optional.empty());
+        if (topicOptional.isPresent()) {
+            return ((PersistentTopic) topicOptional.get()).getManagedLedger().getProperties();
+        } else {
+            return Collections.emptyMap();
+        }
     }
 }

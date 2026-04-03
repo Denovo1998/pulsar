@@ -63,12 +63,13 @@ import org.apache.pulsar.common.schema.KeyValueEncodingType;
 import org.apache.pulsar.common.schema.SchemaType;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.websocket.data.ProducerMessage;
+import org.eclipse.jetty.client.HttpClient;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
-import org.eclipse.jetty.websocket.api.RemoteEndpoint;
+import org.eclipse.jetty.websocket.api.Callback;
 import org.eclipse.jetty.websocket.api.Session;
 import org.eclipse.jetty.websocket.api.annotations.OnWebSocketClose;
-import org.eclipse.jetty.websocket.api.annotations.OnWebSocketConnect;
 import org.eclipse.jetty.websocket.api.annotations.OnWebSocketMessage;
+import org.eclipse.jetty.websocket.api.annotations.OnWebSocketOpen;
 import org.eclipse.jetty.websocket.api.annotations.WebSocket;
 import org.eclipse.jetty.websocket.client.ClientUpgradeRequest;
 import org.eclipse.jetty.websocket.client.WebSocketClient;
@@ -187,6 +188,7 @@ public class CmdProduce extends AbstractCmd {
      *
      * @return list of message bodies
      */
+    @SuppressWarnings({"unchecked", "rawtypes"})
     static List<byte[]> generateMessageBodies(List<String> stringMessages, List<String> messageFileNames,
                                               Schema schema) {
         List<byte[]> messageBodies = new ArrayList<>();
@@ -194,7 +196,10 @@ public class CmdProduce extends AbstractCmd {
         for (String m : stringMessages) {
             if (schema.getSchemaInfo().getType() == SchemaType.AVRO) {
                 // JSON TO AVRO
-                org.apache.avro.Schema avroSchema = ((Optional<org.apache.avro.Schema>) schema.getNativeSchema()).get();
+                @SuppressWarnings("unchecked")
+                Optional<org.apache.avro.Schema> nativeSchema =
+                        (Optional<org.apache.avro.Schema>) (Optional<?>) schema.getNativeSchema();
+                org.apache.avro.Schema avroSchema = nativeSchema.get();
                 byte[] encoded = jsonToAvro(m, avroSchema);
                 messageBodies.add(encoded);
             } else {
@@ -246,6 +251,7 @@ public class CmdProduce extends AbstractCmd {
      * @return 0 for success, < 0 otherwise
      * @throws Exception
      */
+    @SuppressWarnings({"rawtypes", "unchecked"})
     public int run() throws PulsarClientException {
         if (this.numTimesProduce <= 0) {
             throw new CommandLine.ParameterException(commandSpec.commandLine(),
@@ -343,7 +349,8 @@ public class CmdProduce extends AbstractCmd {
                             limiter.acquire();
                         }
 
-                        TypedMessageBuilder message = producer.newMessage();
+                        @SuppressWarnings("unchecked")
+                        TypedMessageBuilder<Object> message = (TypedMessageBuilder<Object>) producer.newMessage();
 
                         if (!kvMap.isEmpty()) {
                             message.properties(kvMap);
@@ -358,7 +365,7 @@ public class CmdProduce extends AbstractCmd {
                                 break;
                             case KEY_VALUE_ENCODING_TYPE_SEPARATED:
                             case KEY_VALUE_ENCODING_TYPE_INLINE:
-                                KeyValue kv = new KeyValue<>(
+                                KeyValue<byte[], byte[]> kv = new KeyValue<>(
                                         keyValueKeyBytes,
                                         content);
                                 message.value(kv);
@@ -437,24 +444,16 @@ public class CmdProduce extends AbstractCmd {
 
     }
 
-    @SuppressWarnings("deprecation")
     @VisibleForTesting
     public String getWebSocketProduceUri(String topic) {
         String serviceURLWithoutTrailingSlash = serviceURL.substring(0,
                 serviceURL.endsWith("/") ? serviceURL.length() - 1 : serviceURL.length());
 
         TopicName topicName = TopicName.get(topic);
-        String wsTopic;
-        if (topicName.isV2()) {
-            wsTopic = String.format("%s/%s/%s/%s", topicName.getDomain(), topicName.getTenant(),
-                    topicName.getNamespacePortion(), topicName.getLocalName());
-        } else {
-            wsTopic = String.format("%s/%s/%s/%s/%s", topicName.getDomain(), topicName.getTenant(),
-                    topicName.getCluster(), topicName.getNamespacePortion(), topicName.getLocalName());
-        }
+        String wsTopic = String.format("%s/%s/%s/%s", topicName.getDomain(), topicName.getTenant(),
+                topicName.getNamespacePortion(), topicName.getLocalName());
 
-        String uriFormat = "%s/ws" + (topicName.isV2() ? "/v2/" : "/") + "producer/%s";
-        return String.format(uriFormat, serviceURLWithoutTrailingSlash, wsTopic);
+        return String.format("%s/ws/v2/producer/%s", serviceURLWithoutTrailingSlash, wsTopic);
     }
 
     @SuppressWarnings("deprecation")
@@ -464,8 +463,12 @@ public class CmdProduce extends AbstractCmd {
 
         URI produceUri = URI.create(getWebSocketProduceUri(topic));
 
-        WebSocketClient produceClient = new WebSocketClient(new SslContextFactory(true));
-        ClientUpgradeRequest produceRequest = new ClientUpgradeRequest();
+        HttpClient httpClient = new HttpClient();
+        httpClient.setSslContextFactory(new SslContextFactory.Client(true));
+        WebSocketClient produceClient = new WebSocketClient(httpClient);
+        produceClient.setMaxTextMessageSize(64 * 1024);
+
+        ClientUpgradeRequest produceRequest = new ClientUpgradeRequest(produceUri);
         try {
             if (authentication != null) {
                 authentication.start();
@@ -492,7 +495,7 @@ public class CmdProduce extends AbstractCmd {
 
         try {
             LOG.info("Trying to create websocket session.. on {},{}", produceUri, produceRequest);
-            produceClient.connect(produceSocket, produceUri, produceRequest);
+            produceClient.connect(produceSocket, produceRequest);
             connected.get();
         } catch (Exception e) {
             LOG.error("Failed to create web-socket session", e);
@@ -521,10 +524,21 @@ public class CmdProduce extends AbstractCmd {
             LOG.info("{} messages successfully produced", numMessagesSent);
         }
 
+        try {
+            produceClient.stop();
+        } catch (Exception e) {
+            LOG.error("Failed to stop websocket-client", e);
+        }
+        try {
+            httpClient.stop();
+        } catch (Exception e) {
+            LOG.error("Failed to stop http-client", e);
+        }
+
         return returnCode;
     }
 
-    @WebSocket(maxTextMessageSize = 64 * 1024)
+    @WebSocket
     public static class ProducerSocket {
 
         private final CountDownLatch closeLatch;
@@ -538,7 +552,7 @@ public class CmdProduce extends AbstractCmd {
         }
 
         public CompletableFuture<Void> send(int index, byte[] content) throws Exception {
-            this.session.getRemote().sendString(getTestJsonPayload(index, content));
+            this.session.sendText(getTestJsonPayload(index, content), Callback.NOOP);
             this.result = new CompletableFuture<>();
             return result;
         }
@@ -561,7 +575,7 @@ public class CmdProduce extends AbstractCmd {
             this.closeLatch.countDown();
         }
 
-        @OnWebSocketConnect
+        @OnWebSocketOpen
         public void onConnect(Session session) {
             LOG.info("Got connect: {}", session);
             this.session = session;
@@ -574,10 +588,6 @@ public class CmdProduce extends AbstractCmd {
             if (this.result != null) {
                 this.result.complete(null);
             }
-        }
-
-        public RemoteEndpoint getRemote() {
-            return this.session.getRemote();
         }
 
         public Session getSession() {

@@ -155,6 +155,7 @@ public class ProxyWithoutServiceDiscoveryTest extends ProducerConsumerBase {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test
     public void testDiscoveryService() throws Exception {
         log.info("-- Starting {} test --", methodName);
@@ -173,13 +174,13 @@ public class ProxyWithoutServiceDiscoveryTest extends ProducerConsumerBase {
 
         admin.tenants().createTenant("my-property", new TenantInfoImpl(Sets.newHashSet("appid1", "appid2"),
                 Sets.newHashSet("without-service-discovery")));
-        admin.namespaces().createNamespace("my-property/without-service-discovery/my-ns");
+        admin.namespaces().createNamespace("my-property/my-ns");
 
         Consumer<byte[]> consumer = proxyClient.newConsumer()
-                .topic("persistent://my-property/without-service-discovery/my-ns/my-topic1")
+                .topic("persistent://my-property/my-ns/my-topic1")
                 .subscriptionName("my-subscriber-name").subscribe();
         Producer<byte[]> producer = proxyClient.newProducer(Schema.BYTES)
-                .topic("persistent://my-property/without-service-discovery/my-ns/my-topic1").create();
+                .topic("persistent://my-property/my-ns/my-topic1").create();
         final int msgs = 10;
         for (int i = 0; i < msgs; i++) {
             String message = "my-message-" + i;
@@ -204,6 +205,7 @@ public class ProxyWithoutServiceDiscoveryTest extends ProducerConsumerBase {
         log.info("-- Exiting {} test --", methodName);
     }
 
+    @SuppressWarnings("deprecation")
     protected final PulsarClient createPulsarClient(Authentication auth, String lookupUrl) throws Exception {
         closeAdmin();
         admin = spy(PulsarAdmin.builder().serviceHttpUrl(brokerUrlTls.toString())

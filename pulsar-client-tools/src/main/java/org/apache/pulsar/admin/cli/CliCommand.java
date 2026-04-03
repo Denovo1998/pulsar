@@ -42,14 +42,6 @@ public abstract class CliCommand implements Callable<Integer> {
     @Spec
     private CommandSpec commandSpec;
 
-    static String[] validatePropertyCluster(String params) {
-        String[] parts = params.split("/");
-        if (parts.length != 2) {
-            throw new IllegalArgumentException("Parameter format is incorrect");
-        }
-        return parts;
-    }
-
     static String validateNamespace(String namespace) {
         return NamespaceName.get(namespace).toString();
     }
@@ -150,6 +142,8 @@ public abstract class CliCommand implements Callable<Integer> {
     abstract void run() throws Exception;
 
     protected class ParameterException extends CommandLine.ParameterException {
+        private static final long serialVersionUID = 1L;
+
         public ParameterException(String msg) {
             super(commandSpec.commandLine(), msg);
         }

@@ -27,6 +27,7 @@ import com.google.common.annotations.VisibleForTesting;
 import io.netty.buffer.ByteBuf;
 import io.netty.util.Recycler;
 import io.netty.util.Recycler.Handle;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
@@ -58,6 +59,7 @@ import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.BrokerServiceException;
 import org.apache.pulsar.broker.service.MessageExpirer;
 import org.apache.pulsar.broker.service.Replicator;
+import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.api.MessageId;
 import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClientException;
@@ -67,6 +69,7 @@ import org.apache.pulsar.client.impl.ProducerImpl;
 import org.apache.pulsar.client.impl.PulsarClientImpl;
 import org.apache.pulsar.client.impl.SendCallback;
 import org.apache.pulsar.common.api.proto.MarkerType;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.stats.ReplicatorStatsImpl;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.stats.Rate;
@@ -80,6 +83,7 @@ public abstract class PersistentReplicator extends AbstractReplicator
 
     protected final PersistentTopic topic;
     protected final ManagedCursor cursor;
+    protected final String localSchemaTopicName;
 
     protected Optional<DispatchRateLimiter> dispatchRateLimiter = Optional.empty();
     private final Object dispatchRateLimiterLock = new Object();
@@ -94,8 +98,10 @@ public abstract class PersistentReplicator extends AbstractReplicator
 
     protected int messageTTLInSeconds = 0;
 
-    private final Backoff readFailureBackoff = new Backoff(1, TimeUnit.SECONDS,
-            1, TimeUnit.MINUTES, 0, TimeUnit.MILLISECONDS);
+    private final Backoff readFailureBackoff = Backoff.builder()
+            .initialDelay(Duration.ofSeconds(1))
+            .maxBackoff(Duration.ofMinutes(1))
+            .build();
 
     private final PersistentMessageExpiryMonitor expiryMonitor;
     // for connected subscriptions, message expiry will be checked if the backlog is greater than this threshold
@@ -117,12 +123,14 @@ public abstract class PersistentReplicator extends AbstractReplicator
     protected final LinkedList<InFlightTask> inFlightTasks = new LinkedList<>();
 
     public PersistentReplicator(String localCluster, PersistentTopic localTopic, ManagedCursor cursor,
-                                   String remoteCluster, String remoteTopic,
-                                   BrokerService brokerService, PulsarClientImpl replicationClient)
+                                String remoteCluster, String remoteTopic,
+                                BrokerService brokerService, PulsarClientImpl replicationClient,
+                                PulsarAdmin replicationAdmin)
             throws PulsarServerException {
         super(localCluster, localTopic, remoteCluster, remoteTopic, localTopic.getReplicatorPrefix(),
-                brokerService, replicationClient);
+                brokerService, replicationClient, replicationAdmin);
         this.topic = localTopic;
+        this.localSchemaTopicName = TopicName.getPartitionedTopicName(localTopicName).toString();
         this.cursor = Objects.requireNonNull(cursor);
         this.expiryMonitor = new PersistentMessageExpiryMonitor(localTopic,
                 Codec.decode(cursor.getName()), cursor, null);
@@ -378,7 +386,7 @@ public abstract class PersistentReplicator extends AbstractReplicator
         if (msg.getSchemaVersion() == null || msg.getSchemaVersion().length == 0) {
             return CompletableFuture.completedFuture(null);
         }
-        return client.getSchemaProviderLoadingCache().get(localTopicName)
+        return client.getSchemaProviderLoadingCache().get(localSchemaTopicName)
                 .getSchemaByVersion(msg.getSchemaVersion());
     }
 
@@ -503,7 +511,7 @@ public abstract class PersistentReplicator extends AbstractReplicator
         // Reduce read batch size to avoid flooding bookies with retries
         readBatchSize = topic.getBrokerService().pulsar().getConfiguration().getDispatcherMinReadBatchSize();
 
-        long waitTimeMillis = readFailureBackoff.next();
+        long waitTimeMillis = readFailureBackoff.next().toMillis();
 
         if (exception instanceof CursorAlreadyClosedException) {
             log.warn("[{}] Error reading entries because replicator is"

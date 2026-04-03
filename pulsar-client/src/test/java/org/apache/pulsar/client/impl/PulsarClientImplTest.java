@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -47,6 +48,7 @@ import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.regex.Pattern;
@@ -98,16 +100,18 @@ public class PulsarClientImplTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testConsumerIsClosed() throws Exception {
         // mock client connection
         LookupService lookup = mock(LookupService.class);
-        when(lookup.getTopicsUnderNamespace(
+        doReturn(CompletableFuture.completedFuture(
+                        new GetTopicsResult(Collections.emptyList(), null, false, true)))
+                .when(lookup).getTopicsUnderNamespace(
                 any(NamespaceName.class),
                 any(CommandGetTopicsOfNamespace.Mode.class),
                 nullable(String.class),
-                nullable(String.class)))
-                .thenReturn(CompletableFuture.completedFuture(
-                        new GetTopicsResult(Collections.emptyList(), null, false, true)));
+                nullable(String.class),
+                nullable(Map.class));
         when(lookup.getPartitionedTopicMetadata(any(TopicName.class), anyBoolean(), anyBoolean()))
                 .thenReturn(CompletableFuture.completedFuture(new PartitionedTopicMetadata()));
         when(lookup.getBroker(any()))

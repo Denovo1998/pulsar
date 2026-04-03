@@ -31,6 +31,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import org.apache.bookkeeper.client.BookKeeper;
+import org.apache.bookkeeper.client.EnsemblePlacementPolicy;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactoryConfig;
@@ -54,7 +55,8 @@ public class ManagedLedgerClientFactory implements ManagedLedgerStorage {
     private static final Logger log = LoggerFactory.getLogger(ManagedLedgerClientFactory.class);
     private static final String DEFAULT_STORAGE_CLASS_NAME = "bookkeeper";
     private BookkeeperManagedLedgerStorageClass defaultStorageClass;
-    private ManagedLedgerFactory managedLedgerFactory;
+    @VisibleForTesting
+    protected ManagedLedgerFactory managedLedgerFactory;
     private BookKeeper defaultBkClient;
     private final AsyncCache<EnsemblePlacementPolicyConfig, BookKeeper>
             bkEnsemblePolicyToBkClientMap = Caffeine.newBuilder().recordStats().buildAsync();
@@ -138,9 +140,12 @@ public class ManagedLedgerClientFactory implements ManagedLedgerStorage {
             }
 
             // find or create bk-client in cache for a specific ensemblePlacementPolicy
+            @SuppressWarnings("unchecked")
+            Optional<Class<? extends EnsemblePlacementPolicy>> policyClass =
+                    (Optional) Optional.ofNullable(ensemblePlacementPolicyConfig.getPolicyClass());
             return bkEnsemblePolicyToBkClientMap.get(ensemblePlacementPolicyConfig,
                     (config, executor) -> bookkeeperProvider.create(conf, metadataStore, eventLoopGroup,
-                            Optional.ofNullable(ensemblePlacementPolicyConfig.getPolicyClass()),
+                            policyClass,
                             ensemblePlacementPolicyConfig.getProperties(), statsLogger));
         };
 

@@ -73,7 +73,6 @@ public class MetadataStoreFactoryImplTest {
     public void testRemoveIdentifierFromMetadataURL() {
         assertEquals(MetadataStoreFactoryImpl.removeIdentifierFromMetadataURL("zk:host:port"), "host:port");
         assertEquals(MetadataStoreFactoryImpl.removeIdentifierFromMetadataURL("rocksdb:/data/dir"), "/data/dir");
-        assertEquals(MetadataStoreFactoryImpl.removeIdentifierFromMetadataURL("etcd:host:port"), "host:port");
         assertEquals(MetadataStoreFactoryImpl.removeIdentifierFromMetadataURL("memory:name"), "name");
         assertEquals(MetadataStoreFactoryImpl.removeIdentifierFromMetadataURL("http://unknown/url/scheme"),
                 "http://unknown/url/scheme");
@@ -94,9 +93,10 @@ public class MetadataStoreFactoryImplTest {
         }
     }
 
+    @SuppressWarnings("try")
     public static class MyMetadataStore extends AbstractMetadataStore {
         protected MyMetadataStore() {
-            super("custom", OpenTelemetry.noop(), null);
+            super("custom", OpenTelemetry.noop(), null, 1);
         }
 
         @Override

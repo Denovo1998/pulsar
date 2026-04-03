@@ -204,8 +204,8 @@ public class AdminApiOffloadTest extends MockedPulsarServiceBaseTest {
 
     @Test
     public void testOffloadV1() throws Exception {
-        String topicName = "persistent://prop-xyz/test/ns1/topic2";
-        String mlName = "prop-xyz/test/ns1/persistent/topic2";
+        String topicName = "persistent://prop-xyz/ns1/topic2";
+        String mlName = "prop-xyz/ns1/persistent/topic2";
         testOffload(topicName, mlName);
     }
 
@@ -233,6 +233,7 @@ public class AdminApiOffloadTest extends MockedPulsarServiceBaseTest {
         assertNull(offload3);
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testOffloadPoliciesApi() throws Exception {
         final String topicName = testTopic + UUID.randomUUID().toString();
@@ -256,6 +257,7 @@ public class AdminApiOffloadTest extends MockedPulsarServiceBaseTest {
         assertNull(admin.topics().getOffloadPolicies(topicName));
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testOffloadPoliciesAppliedApi() throws Exception {
         final String topicName = testTopic + UUID.randomUUID().toString();
@@ -405,6 +407,7 @@ public class AdminApiOffloadTest extends MockedPulsarServiceBaseTest {
         testOffload(false);
     }
 
+    @SuppressWarnings("deprecation")
     private void testOffload(boolean isPartitioned) throws Exception {
         String topicName = testTopic + UUID.randomUUID().toString();
         int partitionNum = 3;

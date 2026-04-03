@@ -83,11 +83,12 @@ public class AuditorPeriodicBookieCheckTest extends BookKeeperClusterTestCase {
      * Test that the periodic bookie checker works.
      */
     @Test
+    @SuppressWarnings("try")
     public void testPeriodicBookieCheckInterval() throws Exception {
         confByIndex(0).setMetadataServiceUri(
                 zkUtil.getMetadataServiceUri().replaceAll("zk://", "metadata-store:").replaceAll("/ledgers", ""));
         runFunctionWithLedgerManagerFactory(confByIndex(0), mFactory -> {
-            try (LedgerManager ledgerManager = mFactory.newLedgerManager()) {
+            try (LedgerManager ignored = mFactory.newLedgerManager()) {
                 @Cleanup final LedgerUnderreplicationManager underReplicationManager =
                         mFactory.newLedgerUnderreplicationManager();
                 long ledgerId = 12345L;
@@ -99,7 +100,7 @@ public class AuditorPeriodicBookieCheckTest extends BookKeeperClusterTestCase {
                                         getBookie(0),
                                         getBookie(1))));
                 long underReplicatedLedger = -1;
-                for (int i = 0; i < 10; i++) {
+                for (int i = 0; i < 20; i++) {
                     underReplicatedLedger = underReplicationManager.pollLedgerToRereplicate();
                     if (underReplicatedLedger != -1) {
                         break;

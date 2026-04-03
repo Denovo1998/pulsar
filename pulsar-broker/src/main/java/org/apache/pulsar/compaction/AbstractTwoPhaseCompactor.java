@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.compaction;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.netty.buffer.ByteBuf;
 import java.io.IOException;
 import java.time.Duration;
@@ -59,6 +60,8 @@ import org.slf4j.LoggerFactory;
  */
 public abstract class AbstractTwoPhaseCompactor<T> extends Compactor {
 
+  @VisibleForTesting
+  static Runnable injectionAfterSeekInPhaseTwo = () -> {};
   private static final Logger log = LoggerFactory.getLogger(AbstractTwoPhaseCompactor.class);
   protected static final int MAX_OUTSTANDING = 500;
   protected final Duration phaseOneLoopReadTimeout;
@@ -84,6 +87,7 @@ public abstract class AbstractTwoPhaseCompactor<T> extends Compactor {
       RawMessage m,
       MessageMetadata metadata, MessageId id);
 
+  @SuppressWarnings("unchecked")
   @Override
   protected CompletableFuture<Long> doCompaction(RawReader reader, BookKeeper bk) {
     return reader.hasMessageAvailableAsync()
@@ -98,6 +102,7 @@ public abstract class AbstractTwoPhaseCompactor<T> extends Compactor {
         });
   }
 
+  @SuppressWarnings("unchecked")
   private CompletableFuture<PhaseOneResult> phaseOne(RawReader reader) {
     Map<String, T> latestForKey = new HashMap<>();
     CompletableFuture<PhaseOneResult> loopPromise = new CompletableFuture<>();
@@ -121,6 +126,7 @@ public abstract class AbstractTwoPhaseCompactor<T> extends Compactor {
     return loopPromise;
   }
 
+  @SuppressWarnings("unchecked")
   private void phaseOneLoop(RawReader reader,
       Optional<MessageId> firstMessageId,
       Optional<MessageId> toMessageId,
@@ -188,6 +194,7 @@ public abstract class AbstractTwoPhaseCompactor<T> extends Compactor {
     CompletableFuture<Long> promise = new CompletableFuture<>();
 
     reader.seekAsync(from).thenCompose((v) -> {
+          injectionAfterSeekInPhaseTwo.run();
           Semaphore outstanding = new Semaphore(MAX_OUTSTANDING);
           CompletableFuture<Void> loopPromise = new CompletableFuture<>();
           phaseTwoLoop(reader, to, latestForKey, ledger, outstanding, loopPromise, MessageId.earliest);

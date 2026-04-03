@@ -91,6 +91,7 @@ public class PulsarFunctionTlsTest {
     protected String testNamespace = testTenant + "/my-ns";
     private PulsarFunctionTestTemporaryDirectory[] tempDirectories =
             new PulsarFunctionTestTemporaryDirectory[BROKER_COUNT];
+    @SuppressWarnings({"deprecation", "unchecked"})
 
     @BeforeMethod(alwaysRun = true)
     void setup() throws Exception {
@@ -261,21 +262,22 @@ public class PulsarFunctionTlsTest {
             log.info(" -------- Start test function : {}", functionName);
 
             int finalI = i;
+            // Wait for a leader to be ready and create the function.
+            // The createFunctionWithUrl call is included in the retry loop because a leadership
+            // transition can happen between the leader check and the actual API call, causing
+            // a 503 "Leader not yet ready" error.
+            final PulsarAdmin createAdmin = pulsarAdmins[i];
             Awaitility.await().atMost(1, TimeUnit.MINUTES).pollInterval(1, TimeUnit.SECONDS).untilAsserted(() -> {
                 final PulsarWorkerService workerService = ((PulsarWorkerService) fnWorkerServices[finalI]);
                 final LeaderService leaderService = workerService.getLeaderService();
                 assertNotNull(leaderService);
-                if (leaderService.isLeader()) {
-                    assertTrue(true);
-                } else {
+                if (!leaderService.isLeader()) {
                     final WorkerInfo workerInfo = workerService.getMembershipManager().getLeader();
                     assertTrue(workerInfo != null
                             && !workerInfo.getWorkerId().equals(workerService.getWorkerConfig().getWorkerId()));
                 }
+                createAdmin.functions().createFunctionWithUrl(functionConfig, jarFilePathUrl);
             });
-            pulsarAdmins[i].functions().createFunctionWithUrl(
-                functionConfig, jarFilePathUrl
-            );
 
             // Function creation is not strongly consistent, so this test can fail with a get that is too eager and
             // does not have retries.
@@ -291,6 +293,7 @@ public class PulsarFunctionTlsTest {
             pulsarAdmins[i].functions().deleteFunction(config.getTenant(), config.getNamespace(), config.getName());
         }
     }
+    @SuppressWarnings("deprecation")
 
     protected static FunctionConfig createFunctionConfig(
         String jarFile,

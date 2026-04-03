@@ -32,6 +32,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Function;
 import java.util.function.IntSupplier;
 import org.apache.bookkeeper.client.api.BKException;
 import org.apache.bookkeeper.client.api.LedgerEntry;
@@ -202,15 +203,7 @@ public class RangeEntryCacheImpl implements EntryCache {
             return;
         }
 
-        Pair<Integer, Long> removed = entries.removeRange(firstPosition, lastPosition, false);
-        int entriesRemoved = removed.getLeft();
-        long sizeRemoved = removed.getRight();
-        if (log.isTraceEnabled()) {
-            log.trace("[{}] Invalidated entries up to {} - Entries removed: {} - Size removed: {}", ml.getName(),
-                    lastPosition, entriesRemoved, sizeRemoved);
-        }
-
-        manager.entriesRemoved(sizeRemoved, entriesRemoved);
+        removeRangeAndNotify(firstPosition, lastPosition);
     }
 
     @Override
@@ -218,16 +211,22 @@ public class RangeEntryCacheImpl implements EntryCache {
         final Position firstPosition = PositionFactory.create(ledgerId, 0);
         final Position lastPosition = PositionFactory.create(ledgerId + 1, 0);
 
+        if (log.isDebugEnabled()) {
+            log.debug("[{}] Invalidating all entries on ledger {}", ml.getName(), ledgerId);
+        }
+        removeRangeAndNotify(firstPosition, lastPosition);
+        pendingReadsManager.invalidateLedger(ledgerId);
+    }
+
+    private void removeRangeAndNotify(Position firstPosition, Position lastPosition) {
         Pair<Integer, Long> removed = entries.removeRange(firstPosition, lastPosition, false);
         int entriesRemoved = removed.getLeft();
         long sizeRemoved = removed.getRight();
-        if (log.isDebugEnabled()) {
-            log.debug("[{}] Invalidated all entries on ledger {} - Entries removed: {} - Size removed: {}",
-                    ml.getName(), ledgerId, entriesRemoved, sizeRemoved);
+        if (log.isTraceEnabled()) {
+            log.trace("[{}] Invalidated entries in range [{}, {}] - Entries removed: {} - Size removed: {}",
+                    ml.getName(), firstPosition, lastPosition, entriesRemoved, sizeRemoved);
         }
-
         manager.entriesRemoved(sizeRemoved, entriesRemoved);
-        pendingReadsManager.invalidateLedger(ledgerId);
     }
 
     @Override
@@ -519,6 +518,11 @@ public class RangeEntryCacheImpl implements EntryCache {
      */
     CompletableFuture<List<Entry>> readFromStorage(ReadHandle lh, long firstEntry, long lastEntry,
                                                    IntSupplier expectedReadCount) {
+        return readFromStorage(lh, firstEntry, lastEntry, expectedReadCount, true);
+    }
+
+    private CompletableFuture<List<Entry>> readFromStorage(ReadHandle lh, long firstEntry, long lastEntry,
+                                                          IntSupplier expectedReadCount, boolean allowRetry) {
         final int entriesToRead = (int) (lastEntry - firstEntry) + 1;
         CompletableFuture<List<Entry>> readResult = ReadEntryUtils.readAsync(ml, lh, firstEntry, lastEntry)
                 .thenApply(
@@ -550,17 +554,30 @@ public class RangeEntryCacheImpl implements EntryCache {
                                 ledgerEntries.close();
                             }
                         });
-        // handle LH invalidation
-        readResult.exceptionally(exception -> {
-            if (exception instanceof BKException
-                    && ((BKException) exception).getCode() == BKException.Code.TooManyRequestsException) {
-            } else {
+
+        return readResult.handle((entries, exception) -> {
+            if (exception == null) {
+                return CompletableFuture.completedFuture(entries);
+            }
+
+            Throwable cause = FutureUtil.unwrapCompletionException(exception);
+            if (allowRetry && cause instanceof ManagedLedgerException.OffloadReadHandleClosedException) {
+                log.info("[{}] Read handle closed for ledger {}, reopening", ml.getName(), lh.getId());
+                pendingReadsManager.invalidateLedger(lh.getId());
+                return ml.reopenReadHandle(lh.getId())
+                        .thenCompose(reopened -> readFromStorage(reopened, firstEntry, lastEntry, expectedReadCount,
+                                false));
+            }
+
+            if (!(cause instanceof BKException
+                    && ((BKException) cause).getCode() == BKException.Code.TooManyRequestsException)) {
                 ml.invalidateLedgerHandle(lh);
                 pendingReadsManager.invalidateLedger(lh.getId());
             }
-            return null;
-        });
-        return readResult;
+
+            CompletableFuture<List<Entry>> failedFuture = CompletableFuture.failedFuture(cause);
+            return failedFuture;
+        }).thenCompose(Function.identity());
     }
 
     @Override

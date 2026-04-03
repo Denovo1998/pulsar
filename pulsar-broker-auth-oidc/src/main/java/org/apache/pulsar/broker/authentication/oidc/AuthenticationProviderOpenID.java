@@ -148,6 +148,7 @@ public class AuthenticationProviderOpenID implements AuthenticationProvider {
 
     private AuthenticationMetrics authenticationMetrics;
 
+    @SuppressWarnings("deprecation")
     @Override
     public void initialize(ServiceConfiguration config) throws IOException {
         initialize(Context.builder().config(config).build());
@@ -445,7 +446,6 @@ public class AuthenticationProviderOpenID implements AuthenticationProvider {
                 .withAnyOfAudience(allowedAudiences)
                 .withClaimPresence(RegisteredClaims.ISSUED_AT)
                 .withClaimPresence(RegisteredClaims.EXPIRES_AT)
-                .withClaimPresence(RegisteredClaims.NOT_BEFORE)
                 .withClaimPresence(RegisteredClaims.SUBJECT);
 
         if (isRoleClaimNotSubject) {

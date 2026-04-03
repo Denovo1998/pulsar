@@ -34,7 +34,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import org.apache.commons.lang3.StringUtils;
+import lombok.Getter;
 import org.apache.pulsar.broker.authentication.AuthenticationDataHttps;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
 import org.apache.pulsar.broker.authentication.AuthenticationState;
@@ -56,9 +56,9 @@ import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.util.Codec;
 import org.apache.pulsar.common.util.ObjectMapperFactory;
 import org.apache.pulsar.websocket.data.ConsumerCommand;
-import org.eclipse.jetty.websocket.api.Session;
-import org.eclipse.jetty.websocket.api.WebSocketAdapter;
-import org.eclipse.jetty.websocket.servlet.ServletUpgradeResponse;
+import org.eclipse.jetty.ee8.websocket.api.Session;
+import org.eclipse.jetty.ee8.websocket.api.WebSocketAdapter;
+import org.eclipse.jetty.ee8.websocket.server.JettyServerUpgradeResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,10 +74,12 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
             ObjectMapperFactory.getMapper().reader().forType(ConsumerCommand.class);
 
     private ScheduledFuture<?> pingFuture;
+    @Getter
+    protected boolean allowConnect = false;
 
     public AbstractWebSocketHandler(WebSocketService service,
                                     HttpServletRequest request,
-                                    ServletUpgradeResponse response) {
+                                    JettyServerUpgradeResponse response) {
         this.service = service;
         this.request = new WebSocketHttpServletRequestWrapper(request);
 
@@ -88,7 +90,8 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
         extractTopicName(request);
     }
 
-    protected boolean checkAuth(ServletUpgradeResponse response) {
+    @SuppressWarnings("deprecation")
+    protected boolean checkAuth(JettyServerUpgradeResponse response) {
         String authRole = "<none>";
         String authMethodName = request.getHeader(PULSAR_AUTH_METHOD_NAME);
         AuthenticationState authenticationState = null;
@@ -190,6 +193,10 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
 
     @Override
     public void onWebSocketConnect(Session session) {
+        if (!allowConnect) {
+            throw new IllegalStateException("allowConnect is false. "
+                    + "JettyWebSocketCreator should have returned null to prevent connecting.");
+        }
         super.onWebSocketConnect(session);
         int webSocketPingDurationSeconds = service.getConfig().getWebSocketPingDurationSeconds();
         if (webSocketPingDurationSeconds > 0) {
@@ -248,14 +255,7 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
         String uri = request.getRequestURI();
         List<String> parts = Splitter.on("/").splitToList(uri);
 
-        // V1 Format must be like :
-        // /ws/producer/persistent/my-property/my-cluster/my-ns/my-topic
-        // or
-        // /ws/consumer/persistent/my-property/my-cluster/my-ns/my-topic/my-subscription
-        // or
-        // /ws/reader/persistent/my-property/my-cluster/my-ns/my-topic
-
-        // V2 Format must be like :
+        // Format must be like :
         // /ws/v2/producer/persistent/my-property/my-ns/my-topic
         // or
         // /ws/v2/consumer/persistent/my-property/my-ns/my-topic/my-subscription
@@ -264,28 +264,15 @@ public abstract class AbstractWebSocketHandler extends WebSocketAdapter implemen
 
         checkArgument(parts.size() >= 8, "Invalid topic name format");
         checkArgument(parts.get(1).equals("ws"));
+        checkArgument(parts.get(2).equals("v2"));
 
-        final boolean isV2Format = parts.get(2).equals("v2");
-        final int domainIndex = isV2Format ? 4 : 3;
-        checkArgument(parts.get(domainIndex).equals("persistent")
-                || parts.get(domainIndex).equals("non-persistent"));
+        checkArgument(parts.get(4).equals("persistent")
+                || parts.get(4).equals("non-persistent"));
 
-        final String domain = parts.get(domainIndex);
-        final NamespaceName namespace = isV2Format ? NamespaceName.get(parts.get(5), parts.get(6)) :
-                NamespaceName.get(parts.get(4), parts.get(5), parts.get(6));
+        final String domain = parts.get(4);
+        final NamespaceName namespace = NamespaceName.get(parts.get(5), parts.get(6));
 
-        // The topic name which contains slashes is also split, so it needs to be jointed
-        int startPosition = 7;
-        boolean isConsumer = "consumer".equals(parts.get(2)) || "consumer".equals(parts.get(3));
-        int endPosition = isConsumer ? parts.size() - 1 : parts.size();
-        StringBuilder topicName = new StringBuilder(parts.get(startPosition));
-        while (++startPosition < endPosition) {
-            if (StringUtils.isEmpty(parts.get(startPosition))) {
-               continue;
-            }
-            topicName.append("/").append(parts.get(startPosition));
-        }
-        final String name = Codec.decode(topicName.toString());
+        final String name = Codec.decode(parts.get(7));
 
         topic = TopicName.get(domain, namespace, name);
     }

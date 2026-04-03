@@ -553,6 +553,7 @@ public class AuthorizationProducerConsumerTest extends ProducerConsumerBase {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void testUpdateTopicPropertiesAuthorization() throws Exception {
         log.info("-- Starting {} test --", methodName);
         cleanup();
@@ -660,7 +661,7 @@ public class AuthorizationProducerConsumerTest extends ProducerConsumerBase {
         setup();
 
         AuthorizationService authorizationService = new AuthorizationService(conf, null);
-        TopicName topicName = TopicName.get("persistent://prop/cluster/ns/t1");
+        TopicName topicName = TopicName.get("persistent://prop/ns/t1");
         String role = "test-role";
         Assert.assertFalse(authorizationService.canProduce(topicName, role, null));
         Assert.assertFalse(authorizationService.canConsume(topicName, role, null, "sub1"));
@@ -736,7 +737,7 @@ public class AuthorizationProducerConsumerTest extends ProducerConsumerBase {
         setup();
 
         AuthorizationService authorizationService = new AuthorizationService(conf, null);
-        TopicName topicName = TopicName.get("persistent://prop/cluster/ns/t1");
+        TopicName topicName = TopicName.get("persistent://prop/ns/t1");
         String role = "test-role";
         authorizationService.grantPermissionAsync(topicName, null, role, "auth-json").get();
         Assert.assertEquals(TestAuthorizationProviderWithGrantPermission.authDataJson, "auth-json");
@@ -813,6 +814,7 @@ public class AuthorizationProducerConsumerTest extends ProducerConsumerBase {
 
         log.info("-- Exiting {} test --", methodName);
     }
+    @SuppressWarnings("deprecation")
 
     public static class ClientAuthentication implements Authentication {
         String user;
@@ -865,6 +867,7 @@ public class AuthorizationProducerConsumerTest extends ProducerConsumerBase {
         }
 
     }
+    @SuppressWarnings("deprecation")
 
     public static class TestAuthenticationProvider implements AuthenticationProvider {
 

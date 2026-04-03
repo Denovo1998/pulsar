@@ -347,6 +347,12 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private int httpServerAcceptQueueSize = 8192;
 
+    @FieldContext(
+            category = CATEGORY_HTTP,
+            doc = "Idle timeout for HTTP server connections in milliseconds."
+    )
+    private int httpServerIdleTimeout = 30 * 1000;
+
     @FieldContext(category = CATEGORY_SERVER, doc = "Maximum number of inbound http connections. "
             + "(0 to disable limiting)")
     private int maxHttpServerConnections = 2048;
@@ -486,11 +492,27 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private int metadataStoreCacheExpirySeconds = 300;
 
+    private static final String DEFAULT_EXTENDED_RESOURCES_CLASS_NAME =
+            "org.apache.pulsar.broker.DefaultPulsarResourcesExtended";
+
+    @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "The class name of the PulsarResourcesExtended implementation. "
+                    + "This class must implement org.apache.pulsar.broker.PulsarResourcesExtended."
+    )
+    private String pulsarResourcesExtendedClassName = DEFAULT_EXTENDED_RESOURCES_CLASS_NAME;
+
     @FieldContext(
             category = CATEGORY_SERVER,
             doc = "Is metadata store read-only operations."
     )
     private boolean metadataStoreAllowReadOnlyOperations;
+
+    @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "The number of threads used for serializing and deserializing data to and from the metadata store"
+    )
+    private int metadataStoreSerDesThreads = 1;
 
     @Deprecated
     @FieldContext(
@@ -1253,9 +1275,19 @@ public class ServiceConfiguration implements PulsarConfiguration {
     @FieldContext(
             dynamic = false,
             category = CATEGORY_POLICIES,
-            doc = "Enables evaluating subscription pattern on broker side."
+            doc = "Enables evaluating subscription pattern on broker side. "
+                    + "Note: This config no longer controls watching topic list. "
+                    + "Please use `enableBrokerTopicListWatcher` to control that behavior."
     )
     private boolean enableBrokerSideSubscriptionPatternEvaluation = true;
+
+    @FieldContext(
+            dynamic = false,
+            category = CATEGORY_POLICIES,
+            doc = "Enables watching topic add/remove events on broker side for "
+                    + "subscription pattern evaluation."
+    )
+    private boolean enableBrokerTopicListWatcher = true;
 
     @FieldContext(
             dynamic = false,
@@ -1548,7 +1580,7 @@ public class ServiceConfiguration implements PulsarConfiguration {
     @FieldContext(
             category = CATEGORY_SERVER,
             doc = "Max number of snapshot to be cached per subscription.")
-    private int replicatedSubscriptionsSnapshotMaxCachedPerSubscription = 10;
+    private int replicatedSubscriptionsSnapshotMaxCachedPerSubscription = 30;
 
     @FieldContext(
             category = CATEGORY_SERVER,
@@ -1796,6 +1828,14 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "Enable authentication"
     )
     private boolean authenticationEnabled = false;
+
+    @FieldContext(
+        category = CATEGORY_AUTHENTICATION,
+        doc = "Strictly enforce authentication method. If specified, Pulsar will only attempt to authenticate with "
+                + "the provided method. If no method is provided, authentication fails."
+    )
+    private boolean strictAuthMethod = false;
+
     @FieldContext(
         category = CATEGORY_AUTHENTICATION,
         doc = "Authentication provider name list, which is a list of class names"
@@ -2320,11 +2360,6 @@ public class ServiceConfiguration implements PulsarConfiguration {
             doc = "The type of topic that is allowed to be automatically created.(partitioned/non-partitioned)"
     )
     private TopicType allowAutoTopicCreationType = TopicType.NON_PARTITIONED;
-    @FieldContext(category = CATEGORY_SERVER, dynamic = true,
-            doc = "If 'allowAutoTopicCreation' is true and the name of the topic contains 'cluster',"
-                    + "the topic cannot be automatically created."
-    )
-    private boolean allowAutoTopicCreationWithLegacyNamingScheme = true;
     @FieldContext(category = CATEGORY_SERVER, dynamic = true,
             doc = "If 'strictSubscriptionNameVerification' is true, the new subscription name can only contain"
                 + " (a-zA-Z_0-9) and these special chars -=:."
@@ -2994,7 +3029,11 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "Option to override the auto-detected network interfaces max speed"
     )
     private Optional<Double> loadBalancerOverrideBrokerNicSpeedGbps = Optional.empty();
-
+    @FieldContext(
+            category = CATEGORY_LOAD_BALANCER,
+            doc = "Option to override the auto-detected network interfaces"
+    )
+    private List<String> loadBalancerOverrideBrokerNics = new ArrayList<>();
     @FieldContext(
         category = CATEGORY_LOAD_BALANCER,
         dynamic = true,
@@ -3384,6 +3423,16 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private SchemaCompatibilityStrategy schemaCompatibilityStrategy = SchemaCompatibilityStrategy.FULL;
 
+    @FieldContext(
+        category = CATEGORY_SCHEMA,
+        doc = "Whether to allow legacy Jackson JsonSchema format for SchemaType.JSON schema definitions. "
+            + "When false (default), only valid Apache Avro schema format is accepted for SchemaType.JSON, "
+            + "consistent with what the consumer side requires. When true, the pre-2.1 backward-compatible "
+            + "behavior is preserved for deployments that still have topics with legacy-format schemas. "
+            + "See PIP-464 for details."
+    )
+    private boolean schemaJsonAllowLegacyJacksonFormat = false;
+
     /**** --- WebSocket. --- ****/
     @FieldContext(
         category = CATEGORY_WEBSOCKET,
@@ -3509,6 +3558,21 @@ public class ServiceConfiguration implements PulsarConfiguration {
             doc = "Enable expose the broker bundles metrics."
     )
     private boolean exposeBundlesMetricsInPrometheus = false;
+
+    @FieldContext(
+            category = CATEGORY_METRICS,
+            doc = "Enable or disable custom topic metric labels feature. "
+                    + "If enabled, custom metric labels can be set on topics and will be exposed in metrics. "
+                    + "Default is false."
+    )
+    private boolean exposeCustomTopicMetricLabelsEnabled = false;
+
+    @FieldContext(
+            category = CATEGORY_METRICS,
+            doc = "A comma-separated list of Topic Property keys that are allowed to be exposed as metrics."
+            + "Only keys explicitly listed here will be exposed."
+    )
+    private Set<String> allowedTopicPropertyKeysForMetrics = new HashSet<>();
 
     /**** --- Functions. --- ****/
     @FieldContext(

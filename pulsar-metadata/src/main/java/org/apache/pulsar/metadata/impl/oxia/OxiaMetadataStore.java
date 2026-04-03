@@ -27,18 +27,21 @@ import io.oxia.client.api.Version;
 import io.oxia.client.api.exceptions.KeyAlreadyExistsException;
 import io.oxia.client.api.exceptions.UnexpectedVersionIdException;
 import io.oxia.client.api.options.DeleteOption;
+import io.oxia.client.api.options.ListOption;
 import io.oxia.client.api.options.PutOption;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Predicate;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -61,7 +64,7 @@ public class OxiaMetadataStore extends AbstractMetadataStore {
     private Optional<MetadataEventSynchronizer> synchronizer;
 
     public OxiaMetadataStore(AsyncOxiaClient oxia, String identity) {
-        super("oxia-metadata", OpenTelemetry.noop(), null);
+        super("oxia-metadata", OpenTelemetry.noop(), null, 1);
         this.client = oxia;
         this.identity = identity;
         this.synchronizer = Optional.empty();
@@ -75,7 +78,7 @@ public class OxiaMetadataStore extends AbstractMetadataStore {
             boolean enableSessionWatcher)
             throws Exception {
         super("oxia-metadata", Objects.requireNonNull(metadataStoreConfig).getOpenTelemetry(),
-                metadataStoreConfig.getNodeSizeStats());
+                metadataStoreConfig.getNodeSizeStats(), metadataStoreConfig.getNumSerDesThreads());
 
         var linger = metadataStoreConfig.getBatchingMaxDelayMillis();
         if (!metadataStoreConfig.isBatchingEnabled()) {
@@ -203,6 +206,39 @@ public class OxiaMetadataStore extends AbstractMetadataStore {
     @Override
     protected CompletableFuture<Stat> storePut(
             String path, byte[] data, Optional<Long> optExpectedVersion, EnumSet<CreateOption> options) {
+        return doStorePut(path, data, optExpectedVersion, options, Collections.emptyMap());
+    }
+
+    @Override
+    protected CompletableFuture<Stat> storePut(
+            String path, byte[] data, Optional<Long> optExpectedVersion, EnumSet<CreateOption> options,
+            Map<String, String> secondaryIndexes) {
+        return doStorePut(path, data, optExpectedVersion, options, secondaryIndexes);
+    }
+
+    @Override
+    protected CompletableFuture<List<GetResult>> storeFindByIndex(
+            String scanPathPrefix, String indexName, String secondaryKey,
+            Predicate<GetResult> fallbackFilter) {
+        String scopedKey = scanPathPrefix + "/" + secondaryKey;
+        return client.list(scopedKey, scopedKey + "~", Set.of(ListOption.UseIndex(indexName)))
+                .thenCompose(primaryKeys -> {
+                    List<CompletableFuture<Optional<GetResult>>> futures = primaryKeys.stream()
+                            .map(this::storeGet)
+                            .toList();
+                    return FutureUtil.waitForAll(futures)
+                            .thenApply(__ -> futures.stream()
+                                    .map(CompletableFuture::join)
+                                    .filter(Optional::isPresent)
+                                    .map(Optional::get)
+                                    .toList());
+                })
+                .exceptionallyCompose(this::convertException);
+    }
+
+    private CompletableFuture<Stat> doStorePut(
+            String path, byte[] data, Optional<Long> optExpectedVersion, EnumSet<CreateOption> options,
+            Map<String, String> secondaryIndexes) {
         CompletableFuture<Void> parentsCreated = createParents(path);
         return parentsCreated.thenCompose(
                 __ -> {
@@ -242,6 +278,12 @@ public class OxiaMetadataStore extends AbstractMetadataStore {
                     if (options.contains(CreateOption.Ephemeral)) {
                         putOptions.add(PutOption.AsEphemeralRecord);
                     }
+                    var parentPath = parent(path);
+                    var parentPrefix = parentPath == null ? "" : parentPath;
+                    secondaryIndexes.forEach((indexName, secondaryKey) ->
+                            putOptions.add(PutOption.SecondaryIndex(indexName,
+                                    parentPrefix + "/" + secondaryKey)));
+
                     return actualPath
                             .thenCompose(
                                     aPath ->

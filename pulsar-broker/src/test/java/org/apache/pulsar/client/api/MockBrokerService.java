@@ -23,6 +23,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
@@ -69,9 +70,10 @@ import org.apache.pulsar.common.protocol.FrameDecoderUtil;
 import org.apache.pulsar.common.protocol.PulsarDecoder;
 import org.apache.pulsar.common.protocol.schema.SchemaVersion;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
-import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.ee8.nested.AbstractHandler;
+import org.eclipse.jetty.ee8.nested.ContextHandler;
+import org.eclipse.jetty.ee8.nested.Request;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.handler.AbstractHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -83,8 +85,8 @@ public class MockBrokerService {
 
     private class GenericResponseHandler extends AbstractHandler {
         private final ObjectMapper objectMapper = new ObjectMapper();
-        private final String lookupURI = "/lookup/v2/destination/persistent";
-        private final String partitionMetadataURI = "/admin/persistent";
+        private final String lookupURI = "/lookup/v2/topic/persistent";
+        private final String partitionMetadataURI = "/admin/v2/persistent";
         private final PartitionedTopicMetadata singlePartitionedTopicMetadata = new PartitionedTopicMetadata(1);
         private final PartitionedTopicMetadata multiPartitionedTopicMetadata = new PartitionedTopicMetadata(4);
         private final PartitionedTopicMetadata nonPartitionedTopicMetadata = new PartitionedTopicMetadata();
@@ -93,7 +95,7 @@ public class MockBrokerService {
         private final Pattern multiPartPattern = Pattern.compile(".*/multi-part-.*");
 
         @Override
-        public void handle(String s, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
+        public void handle(String target, Request baseRequest, HttpServletRequest request, HttpServletResponse response)
                 throws IOException, ServletException {
             String responseString;
             log.info("Received HTTP request {}", baseRequest.getRequestURI());
@@ -294,7 +296,7 @@ public class MockBrokerService {
 
     public MockBrokerService() {
         server = new Server(0);
-        server.setHandler(new GenericResponseHandler());
+        server.setHandler(new ContextHandler("/", new GenericResponseHandler()));
     }
 
     public void start() {
@@ -337,7 +339,7 @@ public class MockBrokerService {
                 @Override
                 public void initChannel(SocketChannel ch) throws Exception {
                     FrameDecoderUtil.addFrameDecoder(ch.pipeline(), maxMessageSize);
-                    ch.pipeline().addLast("handler", new MockServerCnx());
+                    ch.pipeline().addLast("handler", (ChannelHandler) new MockServerCnx());
                 }
             });
             // Bind and start to accept incoming connections.

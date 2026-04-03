@@ -47,6 +47,7 @@ import org.slf4j.LoggerFactory;
 public class AuthenticationService implements Closeable {
     private static final Logger LOG = LoggerFactory.getLogger(AuthenticationService.class);
     private final String anonymousUserRole;
+    private final boolean strictAuthMethod;
 
     private final Map<String, AuthenticationProvider> providers = new LinkedHashMap<>();
 
@@ -57,6 +58,7 @@ public class AuthenticationService implements Closeable {
     public AuthenticationService(ServiceConfiguration conf, OpenTelemetry openTelemetry)
             throws PulsarServerException {
         anonymousUserRole = conf.getAnonymousUserRole();
+        strictAuthMethod = conf.isStrictAuthMethod();
         if (conf.isAuthenticationEnabled()) {
             try {
                 Map<String, List<AuthenticationProvider>> providerMap = new LinkedHashMap<>();
@@ -117,6 +119,7 @@ public class AuthenticationService implements Closeable {
         return providerToUse;
     }
 
+    @SuppressWarnings("deprecation")
     public boolean authenticateHttpRequest(HttpServletRequest request, HttpServletResponse response)
             throws Exception {
         String authMethodName = getAuthMethodName(request);
@@ -138,6 +141,12 @@ public class AuthenticationService implements Closeable {
                 throw e;
             }
         } else {
+            if (strictAuthMethod) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("No authentication method provided while one was is required");
+                }
+                throw new AuthenticationException("Authentication method missing");
+            }
             for (AuthenticationProvider provider : providers.values()) {
                 try {
                     return provider.authenticateHttpRequest(request, response);

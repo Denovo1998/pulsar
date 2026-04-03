@@ -19,6 +19,7 @@
 package org.apache.pulsar.client.admin.internal;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.net.URL;
 import java.util.Map;
@@ -34,10 +35,10 @@ import org.apache.pulsar.client.admin.Brokers;
 import org.apache.pulsar.client.admin.Clusters;
 import org.apache.pulsar.client.admin.Functions;
 import org.apache.pulsar.client.admin.Lookup;
+import org.apache.pulsar.client.admin.MetadataMigration;
 import org.apache.pulsar.client.admin.Namespaces;
 import org.apache.pulsar.client.admin.NonPersistentTopics;
 import org.apache.pulsar.client.admin.Packages;
-import org.apache.pulsar.client.admin.Properties;
 import org.apache.pulsar.client.admin.ProxyStats;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.ResourceGroups;
@@ -83,7 +84,6 @@ public class PulsarAdminImpl implements PulsarAdmin {
     private final ProxyStats proxyStats;
     private final Tenants tenants;
     private final ResourceGroups resourcegroups;
-    private final Properties properties;
     private final Namespaces namespaces;
     private final Bookies bookies;
     private final TopicsImpl topics;
@@ -104,8 +104,11 @@ public class PulsarAdminImpl implements PulsarAdmin {
     private final Schemas schemas;
     private final Packages packages;
     private final Transactions transactions;
+    private final MetadataMigration metadataMigration;
     protected final WebTarget root;
     protected final Authentication auth;
+    @Getter
+    private AsyncHttpConnectorProvider asyncConnectorProvider;
 
     public PulsarAdminImpl(String serviceUrl, ClientConfigurationData clientConfigData,
                            ClassLoader clientBuilderClassLoader) throws PulsarClientException {
@@ -128,7 +131,7 @@ public class PulsarAdminImpl implements PulsarAdmin {
             clientConfigData.setServiceUrl(serviceUrl);
         }
 
-        AsyncHttpConnectorProvider asyncConnectorProvider = new AsyncHttpConnectorProvider(clientConfigData,
+        asyncConnectorProvider = new AsyncHttpConnectorProvider(clientConfigData,
                 clientConfigData.getAutoCertRefreshSeconds(), acceptGzipCompression);
 
         ClientConfig httpConfig = new ClientConfig();
@@ -170,7 +173,6 @@ public class PulsarAdminImpl implements PulsarAdmin {
         this.proxyStats = new ProxyStatsImpl(root, auth, requestTimeoutMs);
         this.tenants = new TenantsImpl(root, auth, requestTimeoutMs);
         this.resourcegroups = new ResourceGroupsImpl(root, auth, requestTimeoutMs);
-        this.properties = new TenantsImpl(root, auth, requestTimeoutMs);
         this.namespaces = new NamespacesImpl(root, auth, requestTimeoutMs);
         this.topics = new TopicsImpl(root, auth, requestTimeoutMs);
         this.localTopicPolicies = new TopicPoliciesImpl(root, auth, requestTimeoutMs, false);
@@ -186,6 +188,7 @@ public class PulsarAdminImpl implements PulsarAdmin {
         this.bookies = new BookiesImpl(root, auth, requestTimeoutMs);
         this.packages = new PackagesImpl(root, auth, asyncHttpConnector, requestTimeoutMs);
         this.transactions = new TransactionsImpl(root, auth, requestTimeoutMs);
+        this.metadataMigration = new MetadataMigrationImpl(root, auth, requestTimeoutMs);
 
         if (originalCtxLoader != null) {
             Thread.currentThread().setContextClassLoader(originalCtxLoader);
@@ -278,15 +281,6 @@ public class PulsarAdminImpl implements PulsarAdmin {
      */
     public ResourceGroups resourcegroups() {
         return resourcegroups;
-    }
-
-    /**
-     *
-     * @deprecated since 2.0. See {@link #tenants()}
-     */
-    @Deprecated
-    public Properties properties() {
-        return properties;
     }
 
     /**
@@ -431,6 +425,11 @@ public class PulsarAdminImpl implements PulsarAdmin {
         return transactions;
     }
 
+    @Override
+    public MetadataMigration metadataMigration() {
+        return metadataMigration;
+    }
+
     /**
      * Close the Pulsar admin client to release all the resources.
      */
@@ -444,5 +443,10 @@ public class PulsarAdminImpl implements PulsarAdmin {
         client.close();
 
         asyncHttpConnector.close();
+    }
+
+    @VisibleForTesting
+     WebTarget getRoot() {
+        return root;
     }
 }

@@ -43,7 +43,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.StampedLock;
 import java.util.stream.Collectors;
 import javax.annotation.concurrent.ThreadSafe;
 import lombok.Getter;
@@ -97,8 +96,6 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
 
     private final AtomicLong numberDelayedMessages = new AtomicLong(0);
 
-    // Thread safety locks
-    private final StampedLock stampedLock = new StampedLock();
 
     @Getter
     @VisibleForTesting
@@ -277,9 +274,9 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
         });
 
         log.info("[{}] Recover delayed message index bucket snapshot finish, buckets: {}, numberDelayedMessages: {}",
-                context.getName(), immutableBucketMap.size(), numberDelayedMessages.getValue());
+                context.getName(), immutableBucketMap.size(), numberDelayedMessages.longValue());
 
-        return numberDelayedMessages.getValue();
+        return numberDelayedMessages.longValue();
     }
 
     /**
@@ -434,14 +431,13 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
             }
         }
 
-        if (ledgerId < lastMutableBucket.startLedgerId || existBucket) {
-            // If (ledgerId < startLedgerId || existBucket) means that message index belong to previous bucket range,
+        if (ledgerId >= lastMutableBucket.endLedgerId && !existBucket) {
+            lastMutableBucket.addMessage(ledgerId, entryId, deliverAt);
+        } else {
+            // Message index belongs to previous bucket range or the current mutable bucket range,
             // enter sharedBucketPriorityQueue directly
             sharedBucketPriorityQueue.add(deliverAt, ledgerId, entryId);
             lastMutableBucket.putIndexBit(ledgerId, entryId);
-        } else {
-            checkArgument(ledgerId >= lastMutableBucket.endLedgerId);
-            lastMutableBucket.addMessage(ledgerId, entryId, deliverAt);
         }
 
         numberDelayedMessages.incrementAndGet();
@@ -616,24 +612,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
     }
 
     @Override
-    protected long nextDeliveryTime() {
-        // Use optimistic read for frequently called method
-        long stamp = stampedLock.tryOptimisticRead();
-        long result = nextDeliveryTimeUnsafe();
-
-
-        if (!stampedLock.validate(stamp)) {
-            stamp = stampedLock.readLock();
-            try {
-                result = nextDeliveryTimeUnsafe();
-            } finally {
-                stampedLock.unlockRead(stamp);
-            }
-        }
-        return result;
-    }
-
-    private long nextDeliveryTimeUnsafe() {
+    protected synchronized long nextDeliveryTime() {
         if (lastMutableBucket.isEmpty() && !sharedBucketPriorityQueue.isEmpty()) {
             return sharedBucketPriorityQueue.peekN1();
         } else if (sharedBucketPriorityQueue.isEmpty() && !lastMutableBucket.isEmpty()) {
@@ -827,25 +806,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 .orElse(false);
     }
 
-    public boolean containsMessage(long ledgerId, long entryId) {
-        // Try optimistic read first for best performance
-        long stamp = stampedLock.tryOptimisticRead();
-        boolean result = containsMessageUnsafe(ledgerId, entryId);
-
-
-        if (!stampedLock.validate(stamp)) {
-            // Fall back to read lock if validation fails
-            stamp = stampedLock.readLock();
-            try {
-                result = containsMessageUnsafe(ledgerId, entryId);
-            } finally {
-                stampedLock.unlockRead(stamp);
-            }
-        }
-        return result;
-    }
-
-    private boolean containsMessageUnsafe(long ledgerId, long entryId) {
+    public synchronized boolean containsMessage(long ledgerId, long entryId) {
         if (lastMutableBucket.containsMessage(ledgerId, entryId)) {
             return true;
         }

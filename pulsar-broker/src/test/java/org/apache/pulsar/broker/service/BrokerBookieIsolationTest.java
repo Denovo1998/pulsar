@@ -44,7 +44,7 @@ import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
-import org.apache.bookkeeper.mledger.proto.MLDataFormats.ManagedLedgerInfo.LedgerInfo;
+import org.apache.bookkeeper.mledger.proto.ManagedLedgerInfo.LedgerInfo;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.BookieServer;
 import org.apache.bookkeeper.versioning.Versioned;
@@ -126,14 +126,15 @@ public class BrokerBookieIsolationTest {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test
     public void testBookieIsolation() throws Exception {
         final String tenant1 = "tenant1";
         final String cluster = "use";
-        final String ns1 = String.format("%s/%s/%s", tenant1, cluster, "ns1");
-        final String ns2 = String.format("%s/%s/%s", tenant1, cluster, "ns2");
-        final String ns3 = String.format("%s/%s/%s", tenant1, cluster, "ns3");
-        final String ns4 = String.format("%s/%s/%s", tenant1, cluster, "ns4");
+        final String ns1 = String.format("%s/%s", tenant1, "ns1");
+        final String ns2 = String.format("%s/%s", tenant1, "ns2");
+        final String ns3 = String.format("%s/%s", tenant1, "ns3");
+        final String ns4 = String.format("%s/%s", tenant1, "ns4");
         final int totalPublish = 100;
 
         final String brokerBookkeeperClientIsolationGroups = "default-group";
@@ -291,6 +292,7 @@ public class BrokerBookieIsolationTest {
         assertEquals(clientConf.getProperty(REPP_DNS_RESOLVER_CLASS), BookieRackAffinityMapping.class.getName());
     }
 
+    @SuppressWarnings("unchecked")
     private LedgerManager getLedgerManager(BookieImpl bookie1) throws IllegalAccessException {
         DbLedgerStorage ledgerStorage =
                 (DbLedgerStorage) FieldUtils.readDeclaredField(bookie1, "ledgerStorage", true);
@@ -306,11 +308,12 @@ public class BrokerBookieIsolationTest {
         return ledgerManager;
     }
 
+    @SuppressWarnings("deprecation")
     @Test
     public void testSetRackInfoAndAffinityGroupDuringProduce() throws Exception {
         final String tenant1 = "tenant1";
         final String cluster = "use";
-        final String ns2 = String.format("%s/%s/%s", tenant1, cluster, "ns2");
+        final String ns2 = String.format("%s/%s", tenant1, "ns2");
         final int totalPublish = 100;
 
         final String brokerBookkeeperClientIsolationGroups = "default-group";
@@ -446,14 +449,15 @@ public class BrokerBookieIsolationTest {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test
     public void testStrictBookieIsolation() throws Exception {
         final String tenant1 = "tenant1";
         final String cluster = "use";
-        final String ns1 = String.format("%s/%s/%s", tenant1, cluster, "ns1");
-        final String ns2 = String.format("%s/%s/%s", tenant1, cluster, "ns2");
-        final String ns3 = String.format("%s/%s/%s", tenant1, cluster, "ns3");
-        final String ns4 = String.format("%s/%s/%s", tenant1, cluster, "ns4");
+        final String ns1 = String.format("%s/%s", tenant1, "ns1");
+        final String ns2 = String.format("%s/%s", tenant1, "ns2");
+        final String ns3 = String.format("%s/%s", tenant1, "ns3");
+        final String ns4 = String.format("%s/%s", tenant1, "ns4");
         final int totalPublish = 100;
 
         final String brokerBookkeeperClientIsolationGroups = "default-group";
@@ -612,14 +616,15 @@ public class BrokerBookieIsolationTest {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test
     public void testBookieIsolationWithSecondaryGroup() throws Exception {
         final String tenant1 = "tenant1";
         final String cluster = "use";
-        final String ns1 = String.format("%s/%s/%s", tenant1, cluster, "ns1");
-        final String ns2 = String.format("%s/%s/%s", tenant1, cluster, "ns2");
-        final String ns3 = String.format("%s/%s/%s", tenant1, cluster, "ns3");
-        final String ns4 = String.format("%s/%s/%s", tenant1, cluster, "ns4");
+        final String ns1 = String.format("%s/%s", tenant1, "ns1");
+        final String ns2 = String.format("%s/%s", tenant1, "ns2");
+        final String ns3 = String.format("%s/%s", tenant1, "ns3");
+        final String ns4 = String.format("%s/%s", tenant1, "ns4");
         final int totalPublish = 100;
 
         final String brokerBookkeeperClientIsolationGroups = "default-group";
@@ -773,8 +778,8 @@ public class BrokerBookieIsolationTest {
 
         final String tenant1 = "tenant1";
         final String cluster = "use";
-        final String ns2 = String.format("%s/%s/%s", tenant1, cluster, "ns2");
-        final String ns3 = String.format("%s/%s/%s", tenant1, cluster, "ns3");
+        final String ns2 = String.format("%s/%s", tenant1, "ns2");
+        final String ns3 = String.format("%s/%s", tenant1, "ns3");
 
         final String brokerBookkeeperClientIsolationGroups = "default-group";
         final String tenantNamespaceIsolationGroupsPrimary = "tenant1-isolation-primary";

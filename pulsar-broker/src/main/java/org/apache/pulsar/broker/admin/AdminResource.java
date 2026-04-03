@@ -18,12 +18,14 @@
  */
 package org.apache.pulsar.broker.admin;
 
+import static org.apache.commons.lang3.StringUtils.isBlank;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -55,8 +57,6 @@ import org.apache.pulsar.broker.web.RestException;
 import org.apache.pulsar.client.admin.PulsarAdmin;
 import org.apache.pulsar.client.admin.PulsarAdminException;
 import org.apache.pulsar.client.admin.internal.TopicsImpl;
-import org.apache.pulsar.common.naming.Constants;
-import org.apache.pulsar.common.naming.NamespaceBundle;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicDomain;
 import org.apache.pulsar.common.naming.TopicName;
@@ -116,15 +116,8 @@ public abstract class AdminResource extends PulsarWebResource {
 
     // This is a stub method for Mockito
     @Override
-    protected void validateAdminAccessForTenant(String property) {
-        super.validateAdminAccessForTenant(property);
-    }
-
-    // This is a stub method for Mockito
-    @Override
-    protected void validateBundleOwnership(String property, String cluster, String namespace, boolean authoritative,
-            boolean readOnly, NamespaceBundle bundle) {
-        super.validateBundleOwnership(property, cluster, namespace, authoritative, readOnly, bundle);
+    protected void validateAdminAccessForTenant(String tenant) {
+        super.validateAdminAccessForTenant(tenant);
     }
 
     // This is a stub method for Mockito
@@ -213,11 +206,11 @@ public abstract class AdminResource extends PulsarWebResource {
         return result;
     }
 
-    protected void validateNamespaceName(String property, String namespace) {
+    protected void validateNamespaceName(String tenant, String namespace) {
         try {
-            this.namespaceName = NamespaceName.get(property, namespace);
+            this.namespaceName = NamespaceName.get(tenant, namespace);
         } catch (IllegalArgumentException e) {
-            log.warn("[{}] Invalid namespace name [{}/{}]", clientAppId(), property, namespace);
+            log.warn("[{}] Invalid namespace name [{}/{}]", clientAppId(), tenant, namespace);
             throw new RestException(Status.PRECONDITION_FAILED, "Namespace name is not valid");
         }
     }
@@ -234,29 +227,19 @@ public abstract class AdminResource extends PulsarWebResource {
             throw new RestException(Status.SERVICE_UNAVAILABLE, "Failed to validate global cluster configuration");
         }
     }
-    @Deprecated
-    protected void validateNamespaceName(String property, String cluster, String namespace) {
-        try {
-            this.namespaceName = NamespaceName.get(property, cluster, namespace);
-        } catch (IllegalArgumentException e) {
-            log.warn("[{}] Invalid namespace name [{}/{}/{}]", clientAppId(), property, cluster, namespace);
-            throw new RestException(Status.PRECONDITION_FAILED, "Namespace name is not valid");
-        }
-    }
-
-    protected void validateTopicName(String property, String namespace, String encodedTopic) {
+    protected void validateTopicName(String tenant, String namespace, String encodedTopic) {
         String topic = Codec.decode(encodedTopic);
         try {
-            this.namespaceName = NamespaceName.get(property, namespace);
+            this.namespaceName = NamespaceName.get(tenant, namespace);
             this.topicName = TopicName.get(domain(), namespaceName, topic);
         } catch (IllegalArgumentException e) {
-            log.warn("[{}] Invalid topic name [{}://{}/{}/{}]", clientAppId(), domain(), property, namespace, topic);
+            log.warn("[{}] Invalid topic name [{}://{}/{}/{}]", clientAppId(), domain(), tenant, namespace, topic);
             throw new RestException(Status.PRECONDITION_FAILED, "Topic name is not valid");
         }
     }
 
-    protected void validatePersistentTopicName(String property, String namespace, String encodedTopic) {
-        validateTopicName(property, namespace, encodedTopic);
+    protected void validatePersistentTopicName(String tenant, String namespace, String encodedTopic) {
+        validateTopicName(tenant, namespace, encodedTopic);
         if (topicName.getDomain() != TopicDomain.persistent) {
             throw new RestException(Status.NOT_ACCEPTABLE, "Need to provide a persistent topic name");
         }
@@ -279,27 +262,6 @@ public abstract class AdminResource extends PulsarWebResource {
                         throw new RestException(Status.CONFLICT, "Topic is not partitioned topic");
                     }
                 });
-    }
-
-    @Deprecated
-    protected void validateTopicName(String property, String cluster, String namespace, String encodedTopic) {
-        String topic = Codec.decode(encodedTopic);
-        try {
-            this.namespaceName = NamespaceName.get(property, cluster, namespace);
-            this.topicName = TopicName.get(domain(), namespaceName, topic);
-        } catch (IllegalArgumentException e) {
-            log.warn("[{}] Invalid topic name {}://{}/{}/{}/{}", clientAppId(), domain(), property, cluster,
-                    namespace, topic);
-            throw new RestException(Status.PRECONDITION_FAILED, "Topic name is not valid");
-        }
-    }
-
-    @Deprecated
-    protected void validatePersistentTopicName(String property, String cluster, String namespace, String encodedTopic) {
-        validateTopicName(property, cluster, namespace, encodedTopic);
-        if (topicName.getDomain() != TopicDomain.persistent) {
-            throw new RestException(Status.NOT_ACCEPTABLE, "Need to provide a persistent topic name");
-        }
     }
 
     protected WorkerService validateAndGetWorkerService() {
@@ -452,10 +414,7 @@ public abstract class AdminResource extends PulsarWebResource {
 
     protected Set<String> clusters() {
         try {
-            // Remove "global" cluster from returned list
-            Set<String> clusters = clusterResources().list().stream()
-                    .filter(cluster -> !Constants.GLOBAL_CLUSTER.equals(cluster)).collect(Collectors.toSet());
-            return clusters;
+            return new HashSet<>(clusterResources().list());
         } catch (Exception e) {
             throw new RestException(e);
         }
@@ -463,11 +422,7 @@ public abstract class AdminResource extends PulsarWebResource {
 
     protected CompletableFuture<Set<String>> clustersAsync() {
         return clusterResources().listAsync()
-                .thenApply(list ->
-                        list.stream()
-                                .filter(cluster -> !Constants.GLOBAL_CLUSTER.equals(cluster))
-                                .collect(Collectors.toSet())
-                );
+                .thenApply(HashSet::new);
     }
 
     protected void setServletContext(ServletContext servletContext) {
@@ -486,7 +441,6 @@ public abstract class AdminResource extends PulsarWebResource {
         // serve/redirect request else fail partitioned-metadata-request so, client fails while creating
         // producer/consumer
         return validateTopicOperationAsync(topicName, TopicOperation.LOOKUP)
-                .thenCompose(__ -> validateClusterOwnershipAsync(topicName.getCluster()))
                 .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(topicName.getNamespaceObject()))
                 .thenCompose(__ -> {
                     if (checkAllowAutoCreation) {
@@ -498,20 +452,12 @@ public abstract class AdminResource extends PulsarWebResource {
                 });
     }
 
-   protected void validateClusterExists(String cluster) {
-        try {
-            if (!clusterResources().getCluster(cluster).isPresent()) {
+    protected CompletableFuture<Void> validateClusterExistsAsync(String cluster) {
+        return clusterResources().clusterExistsAsync(cluster).thenAccept(clusterExist -> {
+            if (!clusterExist) {
                 throw new RestException(Status.PRECONDITION_FAILED, "Cluster " + cluster + " does not exist.");
             }
-        } catch (Exception e) {
-            throw new RestException(e);
-        }
-    }
-
-    protected Policies getNamespacePolicies(String tenant, String cluster, String namespace) {
-        NamespaceName ns = NamespaceName.get(tenant, cluster, namespace);
-
-        return getNamespacePolicies(ns);
+        });
     }
 
     /**
@@ -651,7 +597,7 @@ public abstract class AdminResource extends PulsarWebResource {
                 .thenCompose(__ -> provisionPartitionedTopicPath(numPartitions, createLocalTopicOnly, properties))
                 .thenCompose(__ -> tryCreatePartitionsAsync(numPartitions))
                 .thenRun(() -> {
-                    if (!createLocalTopicOnly && topicName.isGlobal()
+                    if (!createLocalTopicOnly
                             && pulsar().getConfig().isCreateTopicToRemoteClusterForReplication()) {
                         internalCreatePartitionedTopicToReplicatedClustersInBackground(numPartitions);
                         log.info("[{}] Successfully created partitioned for topic {} for the remote clusters",
@@ -840,6 +786,7 @@ public abstract class AdminResource extends PulsarWebResource {
                 });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<SchemaCompatibilityStrategy> getSchemaCompatibilityStrategyAsyncWithoutAuth() {
         CompletableFuture<SchemaCompatibilityStrategy> future = getTopicPoliciesAsyncWithRetry(topicName)
                 .thenApply(op -> op.map(TopicPolicies::getSchemaCompatibilityStrategy).orElse(null));
@@ -871,6 +818,12 @@ public abstract class AdminResource extends PulsarWebResource {
     protected void checkNotNull(Object o, String errorMessage) {
         if (o == null) {
             throw new RestException(Status.BAD_REQUEST, errorMessage);
+        }
+    }
+
+    protected void checkNotBlank(String str, String errorMessage) {
+        if (isBlank(str)) {
+            throw new RestException(Status.PRECONDITION_FAILED, errorMessage);
         }
     }
 

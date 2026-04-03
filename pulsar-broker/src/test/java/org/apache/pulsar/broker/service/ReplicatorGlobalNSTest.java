@@ -90,13 +90,14 @@ public class ReplicatorGlobalNSTest extends ReplicatorTestBase {
      *
      * @throws Exception
      */
+    @SuppressWarnings("deprecation")
     @Test(priority = Integer.MAX_VALUE)
     public void testRemoveLocalClusterOnGlobalNamespace() throws Exception {
         log.info("--- Starting ReplicatorTest::testRemoveLocalClusterOnGlobalNamespace ---");
 
-        final String namespace = "pulsar/global/removeClusterTest";
+        final String namespace = "pulsar/removeClusterTest";
         admin1.namespaces().createNamespace(namespace);
-        admin1.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("r1", "r2", "r3"));
+        admin1.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("r1", "r2", "r3"), false);
 
         final String topicName = "persistent://" + namespace + "/topic";
 
@@ -114,7 +115,7 @@ public class ReplicatorGlobalNSTest extends ReplicatorTestBase {
         ConsumerImpl<byte[]> consumer2 = (ConsumerImpl<byte[]>) client2.newConsumer().topic(topicName)
                 .subscriptionName("sub1").subscribe();
 
-        admin1.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("r2", "r3"));
+        admin1.namespaces().setNamespaceReplicationClusters(namespace, Sets.newHashSet("r2", "r3"), false);
 
         Awaitility.await().atMost(1, TimeUnit.MINUTES).untilAsserted(() -> {
             Assert.assertFalse(pulsar1.getBrokerService().getTopics().containsKey(topicName));
@@ -179,7 +180,7 @@ public class ReplicatorGlobalNSTest extends ReplicatorTestBase {
         Assert.assertNotNull(replicationClients3.get("r2"));
 
         // Case 1: Update the global namespace replication configuration to only contains the local cluster itself
-        admin1.namespaces().setNamespaceReplicationClusters("pulsar/ns", Sets.newHashSet("r1"));
+        admin1.namespaces().setNamespaceReplicationClusters("pulsar/ns", Sets.newHashSet("r1"), false);
 
         // Wait for config changes to be updated.
         Thread.sleep(1000L);
@@ -193,7 +194,7 @@ public class ReplicatorGlobalNSTest extends ReplicatorTestBase {
         Assert.assertNotNull(replicationClients3.get("r2"));
 
         // Case 2: Update the configuration back
-        admin1.namespaces().setNamespaceReplicationClusters("pulsar/ns", Sets.newHashSet("r1", "r2", "r3"));
+        admin1.namespaces().setNamespaceReplicationClusters("pulsar/ns", Sets.newHashSet("r1", "r2", "r3"), false);
 
         // Wait for config changes to be updated.
         Thread.sleep(1000L);

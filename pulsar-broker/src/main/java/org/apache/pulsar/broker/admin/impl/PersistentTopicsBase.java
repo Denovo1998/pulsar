@@ -102,6 +102,7 @@ import org.apache.pulsar.client.impl.MessageIdImpl;
 import org.apache.pulsar.client.impl.MessageImpl;
 import org.apache.pulsar.common.allocator.PulsarByteBufAllocator;
 import org.apache.pulsar.common.api.proto.BrokerEntryMetadata;
+import org.apache.pulsar.common.api.proto.CommandGetTopicsOfNamespace;
 import org.apache.pulsar.common.api.proto.CommandSubscribe.InitialPosition;
 import org.apache.pulsar.common.api.proto.CommandSubscribe.SubType;
 import org.apache.pulsar.common.api.proto.EncryptionKeys;
@@ -128,6 +129,7 @@ import org.apache.pulsar.common.policies.data.PartitionedTopicInternalStats;
 import org.apache.pulsar.common.policies.data.PersistencePolicies;
 import org.apache.pulsar.common.policies.data.PersistentOfflineTopicStats;
 import org.apache.pulsar.common.policies.data.PersistentTopicInternalStats;
+import org.apache.pulsar.common.policies.data.Policies;
 import org.apache.pulsar.common.policies.data.PublishRate;
 import org.apache.pulsar.common.policies.data.RetentionPolicies;
 import org.apache.pulsar.common.policies.data.SchemaCompatibilityStrategy;
@@ -150,6 +152,7 @@ import org.apache.pulsar.compaction.Compactor;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
 import org.apache.pulsar.transaction.coordinator.TransactionCoordinatorID;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -162,7 +165,8 @@ public class PersistentTopicsBase extends AdminResource {
     private static final String DEPRECATED_CLIENT_VERSION_PREFIX = "Pulsar-CPP-v";
     private static final Version LEAST_SUPPORTED_CLIENT_VERSION_PREFIX = Version.forIntegers(1, 21);
 
-    protected CompletableFuture<List<String>> internalGetListAsync(Optional<String> bundle) {
+    protected CompletableFuture<List<String>> internalGetListAsync(Optional<String> bundle,
+                                                                   @Nullable Map<String, String> properties) {
         return validateNamespaceOperationAsync(namespaceName, NamespaceOperation.GET_TOPICS)
             .thenCompose(__ -> namespaceResources().namespaceExistsAsync(namespaceName))
             .thenAccept(exists -> {
@@ -170,7 +174,8 @@ public class PersistentTopicsBase extends AdminResource {
                     throw new RestException(Status.NOT_FOUND, "Namespace does not exist");
                 }
             })
-            .thenCompose(__ -> topicResources().listPersistentTopicsAsync(namespaceName))
+            .thenCompose(__ -> pulsar().getNamespaceService().getListOfTopicsByProperties(namespaceName,
+               CommandGetTopicsOfNamespace.Mode.PERSISTENT, properties))
             .thenApply(topics ->
                 topics.stream()
                     .filter(topic -> {
@@ -323,11 +328,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected CompletableFuture<Void> internalCreateNonPartitionedTopicAsync(boolean authoritative,
                                                      Map<String, String> properties) {
-        CompletableFuture<Void> ret = validateNonPartitionTopicNameAsync(topicName.getLocalName());
-        if (topicName.isGlobal()) {
-            ret = ret.thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName));
-        }
-        return ret.thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        return validateNonPartitionTopicNameAsync(topicName.getLocalName())
+                .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+                .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
            .thenCompose(__ -> validateNamespaceOperationAsync(topicName.getNamespaceObject(),
                    NamespaceOperation.CREATE_TOPIC))
            .thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName, false, false))
@@ -467,7 +470,7 @@ public class PersistentTopicsBase extends AdminResource {
                                     })
                     );
                 }).thenCompose(__ -> {
-                    if (updateLocal || !topicName.isGlobal()) {
+                    if (updateLocal) {
                         return CompletableFuture.completedFuture(null);
                     }
                     // update remote cluster
@@ -526,9 +529,9 @@ public class PersistentTopicsBase extends AdminResource {
     protected void internalCreateMissedPartitions(AsyncResponse asyncResponse) {
         getPartitionedTopicMetadataAsync(topicName, false, false).thenAccept(metadata -> {
             if (metadata != null && metadata.partitions > 0) {
-                CompletableFuture<Void> future = validateNamespaceOperationAsync(topicName.getNamespaceObject(),
-                        NamespaceOperation.CREATE_TOPIC);
-                future.thenCompose(__ -> tryCreatePartitionsAsync(metadata.partitions)).thenAccept(v -> {
+                validateNamespaceOperationAsync(topicName.getNamespaceObject(),
+                        NamespaceOperation.CREATE_TOPIC)
+                .thenCompose(__ -> tryCreatePartitionsAsync(metadata.partitions)).thenAccept(v -> {
                     asyncResponse.resume(Response.noContent().build());
                 }).exceptionally(e -> {
                     log.error("[{}] Failed to create partitions for topic {}", clientAppId(), topicName);
@@ -659,8 +662,10 @@ public class PersistentTopicsBase extends AdminResource {
         pulsar().getBrokerService().getTopicIfExists(topicName.toString())
             .thenAccept(opt -> {
                 if (!opt.isPresent()) {
-                    throw new RestException(Status.NOT_FOUND,
-                        getTopicNotFoundErrorMessage(topicName.toString()));
+                    future.completeExceptionally(
+                            new WebApplicationException(getTopicNotFoundErrorMessage(topicName.toString()),
+                                    Status.NOT_FOUND));
+                    return;
                 }
                 ManagedLedger managedLedger = ((PersistentTopic) opt.get()).getManagedLedger();
                 managedLedger.asyncSetProperties(properties, new AsyncCallbacks.UpdatePropertiesCallback() {
@@ -680,6 +685,9 @@ public class PersistentTopicsBase extends AdminResource {
                         future.completeExceptionally(exception);
                     }
                 }, null);
+            }).exceptionally(ex -> {
+                future.completeExceptionally(ex);
+                return null;
             });
         return future;
     }
@@ -716,8 +724,10 @@ public class PersistentTopicsBase extends AdminResource {
         pulsar().getBrokerService().getTopicIfExists(topicName.toString())
                 .thenAccept(opt -> {
                     if (!opt.isPresent()) {
-                        throw new RestException(Status.NOT_FOUND,
-                                getTopicNotFoundErrorMessage(topicName.toString()));
+                        future.completeExceptionally(
+                                new WebApplicationException(getTopicNotFoundErrorMessage(topicName.toString()),
+                                        Status.NOT_FOUND));
+                        return;
                     }
                     ManagedLedger managedLedger = ((PersistentTopic) opt.get()).getManagedLedger();
                     managedLedger.asyncDeleteProperty(key, new AsyncCallbacks.UpdatePropertiesCallback() {
@@ -732,6 +742,9 @@ public class PersistentTopicsBase extends AdminResource {
                             future.completeExceptionally(exception);
                         }
                     }, null);
+                }).exceptionally(ex -> {
+                    future.completeExceptionally(ex);
+                    return null;
                 });
         return future;
     }
@@ -892,13 +905,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalUnloadTopic(AsyncResponse asyncResponse, boolean authoritative) {
         log.info("[{}] Unloading topic {}", clientAppId(), topicName);
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.UNLOAD);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            }
-            return CompletableFuture.completedFuture(null);
-        }).thenAccept(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.UNLOAD)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenAccept(__ -> {
            // If the topic name is a partition name, no need to get partition topic metadata again
            if (topicName.isPartitioned()) {
                if (isTransactionCoordinatorAssign(topicName)) {
@@ -965,6 +974,7 @@ public class PersistentTopicsBase extends AdminResource {
        });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<DelayedDeliveryPolicies> internalGetDelayedDeliveryPolicies(boolean applied,
                                                                                             boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
@@ -995,13 +1005,15 @@ public class PersistentTopicsBase extends AdminResource {
             });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<OffloadPoliciesImpl> internalGetOffloadPolicies(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> {
                 OffloadPoliciesImpl offloadPolicies = op.map(TopicPolicies::getOffloadPolicies).orElse(null);
                 if (applied) {
-                    OffloadPoliciesImpl namespacePolicy =
-                            (OffloadPoliciesImpl) getNamespacePolicies(namespaceName).offload_policies;
+                    Policies policies = getNamespacePolicies(namespaceName);
+                    OffloadPoliciesImpl namespacePolicy = (OffloadPoliciesImpl) policies.offload_policies;
+                    namespacePolicy = OffloadPoliciesImpl.oldPoliciesCompatible(namespacePolicy, policies);
                     offloadPolicies = OffloadPoliciesImpl.mergeConfiguration(offloadPolicies
                             , namespacePolicy, pulsar().getConfiguration().getProperties());
                 }
@@ -1009,6 +1021,7 @@ public class PersistentTopicsBase extends AdminResource {
             });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Void> internalSetOffloadPolicies(OffloadPoliciesImpl offloadPoliciesToSet,
                                                                  boolean isGlobal) {
         return pulsar().getTopicPoliciesService()
@@ -1017,6 +1030,7 @@ public class PersistentTopicsBase extends AdminResource {
                 });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<InactiveTopicPolicies> internalGetInactiveTopicPolicies
             (boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
@@ -1041,6 +1055,7 @@ public class PersistentTopicsBase extends AdminResource {
                 });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Integer> internalGetMaxUnackedMessagesOnSubscription(boolean applied,
                                                                                      boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
@@ -1058,8 +1073,8 @@ public class PersistentTopicsBase extends AdminResource {
     protected CompletableFuture<Void> internalSetMaxUnackedMessagesOnSubscription(Integer maxUnackedNumToSet,
                                                                                   boolean isGlobal) {
         if (maxUnackedNumToSet != null && maxUnackedNumToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED,
-                    "maxUnackedNum must be 0 or more");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "maxUnackedNum must be 0 or more"));
         }
 
         return pulsar().getTopicPoliciesService()
@@ -1068,6 +1083,7 @@ public class PersistentTopicsBase extends AdminResource {
                 });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Integer> internalGetMaxUnackedMessagesOnConsumer(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getMaxUnackedMessagesOnConsumer)
@@ -1083,8 +1099,8 @@ public class PersistentTopicsBase extends AdminResource {
     protected CompletableFuture<Void> internalSetMaxUnackedMessagesOnConsumer(Integer maxUnackedNumToSet,
                                                                               boolean isGlobal) {
         if (maxUnackedNumToSet != null && maxUnackedNumToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED,
-                    "maxUnackedNum must be 0 or more");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "maxUnackedNum must be 0 or more"));
         }
 
         return pulsar().getTopicPoliciesService()
@@ -1096,7 +1112,8 @@ public class PersistentTopicsBase extends AdminResource {
     protected CompletableFuture<Void> internalSetDeduplicationSnapshotInterval(Integer intervalToSet,
                                                                                boolean isGlobal) {
         if (intervalToSet != null && intervalToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED, "interval must be 0 or more");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "interval must be 0 or more"));
         }
         return pulsar().getTopicPoliciesService()
                 .updateTopicPoliciesAsync(topicName, isGlobal, intervalToSet == null, policies -> {
@@ -1165,14 +1182,9 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected void internalGetSubscriptions(AsyncResponse asyncResponse, boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.GET_SUBSCRIPTIONS);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        validateTopicOperationAsync(topicName, TopicOperation.GET_SUBSCRIPTIONS)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenAccept(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (topicName.isPartitioned()) {
@@ -1295,28 +1307,18 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected CompletableFuture<? extends TopicStats> internalGetStatsAsync(boolean authoritative,
                                                                             GetStatsOptions getStatsOptions) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.GET_STATS);
-        return future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        return validateTopicOperationAsync(topicName, TopicOperation.GET_STATS)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> getTopicReferenceAsync(topicName))
         .thenCompose(topic -> topic.asyncGetStats(getStatsOptions));
     }
 
     protected CompletableFuture<PersistentTopicInternalStats> internalGetInternalStatsAsync(boolean authoritative,
                                                                                             boolean metadata) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.GET_STATS);
-        return future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        return validateTopicOperationAsync(topicName, TopicOperation.GET_STATS)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> {
             if (metadata) {
                 return validateTopicOperationAsync(topicName, TopicOperation.GET_METADATA);
@@ -1328,13 +1330,9 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected void internalGetManagedLedgerInfo(AsyncResponse asyncResponse, boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.GET_STATS);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            }
-            return CompletableFuture.completedFuture(null);
-        }).thenAccept(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.GET_STATS)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenAccept(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (topicName.isPartitioned()) {
                 internalGetManagedLedgerInfoForNonPartitionedTopic(asyncResponse);
@@ -1446,13 +1444,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalGetPartitionedStats(AsyncResponse asyncResponse, boolean authoritative, boolean perPartition,
                                                GetStatsOptions getStatsOptions) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.GET_STATS);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            }
-            return  CompletableFuture.completedFuture(null);
-        }).thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName,
+        validateTopicOperationAsync(topicName, TopicOperation.GET_STATS)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName,
                 authoritative, false)).thenAccept(partitionMetadata -> {
             if (partitionMetadata.partitions == 0) {
                 asyncResponse.resume(new RestException(Status.NOT_FOUND,
@@ -1536,14 +1530,9 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected void internalGetPartitionedStatsInternal(AsyncResponse asyncResponse, boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.GET_STATS);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
+        validateTopicOperationAsync(topicName, TopicOperation.GET_STATS)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
         .thenAccept(partitionMetadata -> {
             if (partitionMetadata.partitions == 0) {
                 asyncResponse.resume(new RestException(Status.NOT_FOUND,
@@ -1594,14 +1583,9 @@ public class PersistentTopicsBase extends AdminResource {
     protected CompletableFuture<Void> internalDeleteSubscriptionAsync(String subName,
                                                                       boolean authoritative,
                                                                       boolean force) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.UNSUBSCRIBE, subName);
-        return future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> {
+        return validateTopicOperationAsync(topicName, TopicOperation.UNSUBSCRIBE, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> {
             if (topicName.isPartitioned()) {
                 return internalDeleteSubscriptionForNonPartitionedTopicAsync(subName, authoritative, force);
             } else {
@@ -1693,6 +1677,7 @@ public class PersistentTopicsBase extends AdminResource {
 
                         result.setEntries(rawResult.getEntries());
                         result.setMessages(rawResult.getMessages());
+                        result.setMarkerMessages(rawResult.getMarkerMessages());
 
                         result.setFilterAcceptedEntries(rawResult.getFilterAcceptedEntries());
                         result.setFilterRejectedEntries(rawResult.getFilterRejectedEntries());
@@ -1772,14 +1757,9 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected void internalSkipAllMessages(AsyncResponse asyncResponse, String subName, boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.SKIP, subName);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        validateTopicOperationAsync(topicName, TopicOperation.SKIP, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (topicName.isPartitioned()) {
@@ -1885,14 +1865,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalSkipMessages(AsyncResponse asyncResponse, String subName, int numMessages,
                                         boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.SKIP, subName);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        validateTopicOperationAsync(topicName, TopicOperation.SKIP, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
         .thenCompose(partitionMetadata -> {
              if (partitionMetadata.partitions > 0) {
@@ -1949,14 +1924,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalExpireMessagesForAllSubscriptions(AsyncResponse asyncResponse, int expireTimeInSeconds,
             boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.EXPIRE_MESSAGES);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
+        validateTopicOperationAsync(topicName, TopicOperation.EXPIRE_MESSAGES)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
         .thenAccept(partitionMetadata -> {
             if (topicName.isPartitioned()) {
                 internalExpireMessagesForAllSubscriptionsForNonPartitionedTopic(asyncResponse,
@@ -2084,14 +2054,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected CompletableFuture<Void> internalResetCursorAsync(String subName, long timestamp,
             boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.RESET_CURSOR, subName);
-        return future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        return validateTopicOperationAsync(topicName, TopicOperation.RESET_CURSOR, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (topicName.isPartitioned()) {
@@ -2188,14 +2153,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalCreateSubscription(AsyncResponse asyncResponse, String subscriptionName,
             MessageIdImpl messageId, boolean authoritative, boolean replicated, Map<String, String> properties) {
-        CompletableFuture<Void> ret = validateTopicOperationAsync(topicName, TopicOperation.SUBSCRIBE,
-                subscriptionName);
-        ret.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            }
-            return CompletableFuture.completedFuture(null);
-        }).thenAccept(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.SUBSCRIBE, subscriptionName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenAccept(__ -> {
             final MessageIdImpl targetMessageId = messageId == null ? (MessageIdImpl) MessageId.latest : messageId;
             log.info("[{}][{}] Creating subscription {} at message id {} with properties {}", clientAppId(),
                     topicName, subscriptionName, targetMessageId, properties);
@@ -2354,13 +2314,9 @@ public class PersistentTopicsBase extends AdminResource {
     protected void internalUpdateSubscriptionProperties(AsyncResponse asyncResponse, String subName,
                                                         Map<String, String> subscriptionProperties,
                                                         boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.SUBSCRIBE, subName);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            }
-            return CompletableFuture.completedFuture(null);
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative)).thenAccept(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.SUBSCRIBE, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative)).thenAccept(__ -> {
             if (topicName.isPartitioned()) {
                 internalUpdateSubscriptionPropertiesForNonPartitionedTopic(asyncResponse, subName,
                         subscriptionProperties, authoritative);
@@ -2432,13 +2388,9 @@ public class PersistentTopicsBase extends AdminResource {
     protected void internalAnalyzeSubscriptionBacklog(AsyncResponse asyncResponse, String subName,
                                                       Optional<Position> position,
                                                       boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.CONSUME, subName);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            }
-            return CompletableFuture.completedFuture(null);
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        validateTopicOperationAsync(topicName, TopicOperation.CONSUME, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
                 .thenCompose(__ -> {
                     if (topicName.isPartitioned()) {
                         return CompletableFuture.completedFuture(null);
@@ -2470,13 +2422,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalGetSubscriptionProperties(AsyncResponse asyncResponse, String subName,
                                                         boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.CONSUME, subName);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            }
-            return CompletableFuture.completedFuture(null);
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative)).thenAccept(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.CONSUME, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative)).thenAccept(__ -> {
             if (topicName.isPartitioned()) {
                 internalGetSubscriptionPropertiesForNonPartitionedTopic(asyncResponse, subName,
                         authoritative);
@@ -2554,8 +2502,8 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalResetCursorOnPosition(AsyncResponse asyncResponse, String subName, boolean authoritative,
             MessageIdImpl messageId, boolean isExcluded, int batchIndex) {
-        CompletableFuture<Void> ret = validateTopicOperationAsync(topicName, TopicOperation.RESET_CURSOR, subName);
-        ret.thenCompose(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.RESET_CURSOR, subName)
+        .thenCompose(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (!topicName.isPartitioned()) {
                 return getPartitionedTopicMetadataAsync(topicName, authoritative, false)
@@ -2571,13 +2519,8 @@ public class PersistentTopicsBase extends AdminResource {
             } else {
                 return CompletableFuture.completedFuture(null);
             }
-        }).thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> {
+        }).thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> {
             log.info("[{}][{}] received reset cursor on subscription {} to position {}", clientAppId(), topicName,
                     subName, messageId);
             return validateTopicOwnershipAsync(topicName, authoritative);
@@ -2728,14 +2671,9 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected CompletableFuture<Response> internalGetMessageById(long ledgerId, long entryId, boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES);
-        return future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> {
+        return validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> {
             if (topicName.isPartitioned()) {
                 return CompletableFuture.completedFuture(null);
             } else {
@@ -2791,14 +2729,9 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected CompletableFuture<MessageId> internalGetMessageIdByTimestampAsync(long timestamp, boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES);
-        return future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> {
+        return validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> {
                 if (topicName.isPartitioned()) {
                     return CompletableFuture.completedFuture(null);
                 } else {
@@ -2862,8 +2795,8 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected CompletableFuture<Response> internalPeekNthMessageAsync(String subName, int messagePosition,
                                                                       boolean authoritative) {
-        CompletableFuture<Void> ret = validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES, subName);
-        return ret.thenCompose(__ -> {
+        return validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES, subName)
+        .thenCompose(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (!topicName.isPartitioned()) {
                 return getPartitionedTopicMetadataAsync(topicName, authoritative, false)
@@ -2921,14 +2854,9 @@ public class PersistentTopicsBase extends AdminResource {
                                                                       boolean authoritative) {
         long messagePositionLocal = messagePosition < 1 ? 1 : messagePosition;
         String initialPositionLocal = initialPosition == null ? "latest" : initialPosition;
-        CompletableFuture<Void> ret = validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES);
-        return ret.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        return validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> {
             if (!topicName.isPartitioned()) {
                 return getPartitionedTopicMetadataAsync(topicName, authoritative, false)
@@ -3156,15 +3084,10 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected CompletableFuture<PersistentOfflineTopicStats> internalGetBacklogAsync(boolean authoritative) {
-        CompletableFuture<Void> ret;
-        if (topicName.isGlobal()) {
-            ret = validateGlobalNamespaceOwnershipAsync(namespaceName);
-        } else {
-            ret = CompletableFuture.completedFuture(null);
-        }
         // Validate that namespace exists, throw 404 if it doesn't exist
         // note that we do not want to load the topic and hence skip authorization check
-        return ret.thenCompose(__ -> namespaceResources().getPoliciesAsync(namespaceName))
+        return validateGlobalNamespaceOwnershipAsync(namespaceName)
+                .thenCompose(__ -> namespaceResources().getPoliciesAsync(namespaceName))
                 .thenCompose(__ -> {
                     PersistentOfflineTopicStats offlineTopicStats =
                             pulsar().getBrokerService().getOfflineTopicStat(topicName);
@@ -3199,6 +3122,7 @@ public class PersistentTopicsBase extends AdminResource {
                 });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Map<BacklogQuota.BacklogQuotaType, BacklogQuota>> internalGetBacklogQuota(
             boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
@@ -3227,8 +3151,8 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalGetBacklogSizeByMessageId(AsyncResponse asyncResponse,
                                                      MessageIdImpl messageId, boolean authoritative) {
-        CompletableFuture<Void> ret = validateTopicOperationAsync(topicName, TopicOperation.GET_BACKLOG_SIZE);
-        ret.thenCompose(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.GET_BACKLOG_SIZE)
+        .thenCompose(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (!topicName.isPartitioned()) {
                 return getPartitionedTopicMetadataAsync(topicName, authoritative, false)
@@ -3244,13 +3168,8 @@ public class PersistentTopicsBase extends AdminResource {
             } else {
                 return CompletableFuture.completedFuture(null);
             }
-        }).thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        }).thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(unused -> getTopicReferenceAsync(topicName))
         .thenAccept(t -> {
             PersistentTopic topic = (PersistentTopic) t;
@@ -3341,12 +3260,6 @@ public class PersistentTopicsBase extends AdminResource {
         }
         Set<String> replicationClustersSet = Sets.newHashSet(clusterIds);
         return validatePoliciesReadOnlyAccessAsync()
-                .thenAccept(__ -> {
-                    if (replicationClustersSet.contains("global")) {
-                        throw new RestException(Status.PRECONDITION_FAILED,
-                                "Cannot specify global in the list of replication clusters");
-                    }
-                })
                 .thenCompose(__ -> {
                     // Set a topic-level replicated clusters that do not contain local cluster is not meaningful, except
                     // the following scenario: User has two clusters, which enabled Geo-Replication through a global
@@ -3445,6 +3358,7 @@ public class PersistentTopicsBase extends AdminResource {
                 }));
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Boolean> internalGetDeduplication(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getDeduplicationEnabled)
@@ -3461,6 +3375,38 @@ public class PersistentTopicsBase extends AdminResource {
         return pulsar().getTopicPoliciesService()
                 .updateTopicPoliciesAsync(topicName, isGlobal, enabledToSet == null, policies -> {
                     policies.setDeduplicationEnabled(enabledToSet);
+                });
+    }
+
+    @SuppressWarnings("deprecation")
+    protected CompletableFuture<Integer> internalGetSubscriptionExpirationTime(boolean applied, boolean isGlobal) {
+        return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
+                .thenApply(op -> op.map(TopicPolicies::getSubscriptionExpirationTimeInMinutes)
+                        .orElseGet(() -> {
+                            if (applied) {
+                                Integer namespacePolicy = getNamespacePolicies(namespaceName)
+                                        .subscription_expiration_time_minutes;
+                                return namespacePolicy == null
+                                        ? config().getSubscriptionExpirationTimeMinutes()
+                                        : namespacePolicy;
+                            }
+                            return null;
+                        }));
+    }
+
+    protected CompletableFuture<Void> internalSetSubscriptionExpirationTime(Integer expirationTimeToSet,
+                                                                            boolean isGlobal) {
+        if (expirationTimeToSet != null && expirationTimeToSet < 0) {
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "Invalid value for subscription expiration time"));
+        }
+
+        return pulsar().getTopicPoliciesService()
+                .updateTopicPoliciesAsync(topicName, isGlobal, expirationTimeToSet == null, policies -> {
+                    policies.setSubscriptionExpirationTimeInMinutes(expirationTimeToSet);
+                    log.info("[{}] Successfully set topic subscription expiration time: namespace={}, "
+                                    + "topic={}, time={}",
+                            clientAppId(), namespaceName, topicName.getLocalName(), expirationTimeToSet);
                 });
     }
 
@@ -3489,6 +3435,7 @@ public class PersistentTopicsBase extends AdminResource {
                 .thenApply(policies -> policies.retention_policies);
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<RetentionPolicies> internalGetRetention(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getRetentionPolicies).orElseGet(() -> {
@@ -3558,6 +3505,7 @@ public class PersistentTopicsBase extends AdminResource {
                 .orElse(false));
 }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<PersistencePolicies> internalGetPersistence(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getPersistence)
@@ -3595,9 +3543,9 @@ public class PersistentTopicsBase extends AdminResource {
     protected CompletableFuture<Void> internalSetMaxMessageSize(Integer maxMessageSizeToSet, boolean isGlobal) {
         if (maxMessageSizeToSet != null && (maxMessageSizeToSet < 0
                 || maxMessageSizeToSet > config().getMaxMessageSize())) {
-            throw new RestException(Status.PRECONDITION_FAILED
-                    , "topic-level maxMessageSize must be greater than or equal to 0 "
-                    + "and must be smaller than that in the broker-level");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "topic-level maxMessageSize must be greater than or equal to 0 "
+                            + "and must be smaller than that in the broker-level"));
         }
 
         return pulsar().getTopicPoliciesService()
@@ -3611,6 +3559,7 @@ public class PersistentTopicsBase extends AdminResource {
                 .thenApply(op -> op.map(TopicPolicies::getMaxMessageSize));
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Integer> internalGetMaxProducers(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getMaxProducerPerTopic)
@@ -3625,8 +3574,8 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected CompletableFuture<Void> internalSetMaxProducers(Integer maxProducersToSet, boolean isGlobal) {
         if (maxProducersToSet != null && maxProducersToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED,
-                    "maxProducers must be 0 or more");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "maxProducers must be 0 or more"));
         }
         return pulsar().getTopicPoliciesService()
                 .updateTopicPoliciesAsync(topicName, isGlobal, maxProducersToSet == null, policies -> {
@@ -3642,8 +3591,8 @@ public class PersistentTopicsBase extends AdminResource {
     protected CompletableFuture<Void> internalSetMaxSubscriptionsPerTopic(Integer maxSubscriptionsToSet,
                                                                           boolean isGlobal) {
         if (maxSubscriptionsToSet != null && maxSubscriptionsToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED,
-                    "maxSubscriptionsPerTopic must be 0 or more");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "maxSubscriptionsPerTopic must be 0 or more"));
         }
 
         return pulsar().getTopicPoliciesService()
@@ -3652,6 +3601,7 @@ public class PersistentTopicsBase extends AdminResource {
                 });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<DispatchRateImpl> internalGetReplicatorDispatchRate(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getReplicatorDispatchRate)
@@ -3682,13 +3632,7 @@ public class PersistentTopicsBase extends AdminResource {
             return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
                     "Not allowed to set/get topic policy for a partition"));
         }
-        CompletableFuture<Void> ret;
-        if (topicName.isGlobal()) {
-            ret = validateGlobalNamespaceOwnershipAsync(namespaceName);
-        } else {
-            ret = CompletableFuture.completedFuture(null);
-        }
-        return ret
+        return validateGlobalNamespaceOwnershipAsync(namespaceName)
                 .thenCompose(__ -> checkTopicExistsAsync(topicName))
                 .thenCompose(topicExistsInfo -> {
                     if (!topicExistsInfo.isExists()) {
@@ -3714,6 +3658,7 @@ public class PersistentTopicsBase extends AdminResource {
         });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Integer> internalGetMaxConsumers(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getMaxConsumerPerTopic)
@@ -3728,8 +3673,8 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected CompletableFuture<Void> internalSetMaxConsumers(Integer maxConsumersToSet, boolean isGlobal) {
         if (maxConsumersToSet != null && maxConsumersToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED,
-                    "maxConsumers must be 0 or more");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "maxConsumers must be 0 or more"));
         }
         return pulsar().getTopicPoliciesService()
                 .updateTopicPoliciesAsync(topicName, isGlobal, maxConsumersToSet == null, policies -> {
@@ -3749,14 +3694,9 @@ public class PersistentTopicsBase extends AdminResource {
                     "Termination of a system topic is not allowed"));
         }
 
-        CompletableFuture<Void> ret = validateTopicOperationAsync(topicName, TopicOperation.TERMINATE);
-        return ret.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        return validateTopicOperationAsync(topicName, TopicOperation.TERMINATE)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
         .thenAccept(partitionMetadata -> {
             if (partitionMetadata.partitions > 0) {
@@ -3782,14 +3722,9 @@ public class PersistentTopicsBase extends AdminResource {
             asyncResponse.resume(new RestException(Status.METHOD_NOT_ALLOWED, msg));
             return;
         }
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.TERMINATE);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(unused -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
+        validateTopicOperationAsync(topicName, TopicOperation.TERMINATE)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(unused -> getPartitionedTopicMetadataAsync(topicName, authoritative, false))
         .thenAccept(partitionMetadata -> {
             if (partitionMetadata.partitions == 0) {
                 String msg = "Termination of a non-partitioned topic is not allowed using partitioned-terminate"
@@ -3850,15 +3785,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalExpireMessagesByTimestamp(AsyncResponse asyncResponse, String subName,
                                                      int expireTimeInSeconds, boolean authoritative) {
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.EXPIRE_MESSAGES,
-                subName);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        validateTopicOperationAsync(topicName, TopicOperation.EXPIRE_MESSAGES, subName)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ ->
             // If the topic name is a partition name, no need to get partition topic metadata again
             getPartitionedTopicMetadataAsync(topicName, authoritative, false)
@@ -4013,8 +3942,8 @@ public class PersistentTopicsBase extends AdminResource {
             asyncResponse.resume(new RestException(Status.PRECONDITION_FAILED, msg));
             return;
         }
-        CompletableFuture<Void> ret = validateTopicOperationAsync(topicName, TopicOperation.EXPIRE_MESSAGES, subName);
-        ret.thenCompose(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.EXPIRE_MESSAGES, subName)
+        .thenCompose(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (!topicName.isPartitioned()) {
                 return getPartitionedTopicMetadataAsync(topicName, authoritative, false)
@@ -4029,13 +3958,8 @@ public class PersistentTopicsBase extends AdminResource {
             } else {
                 return CompletableFuture.completedFuture(null);
             }
-        }).thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
+        }).thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
         .thenCompose(__ -> {
             log.info("[{}][{}] Received expire messages on subscription {} to position {}", clientAppId(),
                     topicName, subName, messageId);
@@ -4137,14 +4061,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalTriggerCompaction(AsyncResponse asyncResponse, boolean authoritative) {
         log.info("[{}] Trigger compaction on topic {}", clientAppId(), topicName);
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.COMPACT);
-        future.thenCompose(__ -> {
-            if (topicName.isGlobal()) {
-                return validateGlobalNamespaceOwnershipAsync(namespaceName);
-            } else {
-                return CompletableFuture.completedFuture(null);
-            }
-        }).thenAccept(__ -> {
+        validateTopicOperationAsync(topicName, TopicOperation.COMPACT)
+        .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+        .thenAccept(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
             if (topicName.isPartitioned()) {
                 internalTriggerCompactionNonPartitionedTopic(asyncResponse, authoritative);
@@ -4361,7 +4280,7 @@ public class PersistentTopicsBase extends AdminResource {
      */
     public static CompletableFuture<PartitionedTopicMetadata> unsafeGetPartitionedTopicMetadataAsync(
         PulsarService pulsar, TopicName topicName) {
-        CompletableFuture<PartitionedTopicMetadata> metadataFuture = new CompletableFuture();
+        CompletableFuture<PartitionedTopicMetadata> metadataFuture = new CompletableFuture<>();
 
         // validates global-namespace contains local/peer cluster: if peer/local cluster present then lookup can
         // serve/redirect request else fail partitioned-metadata-request so, client fails while creating
@@ -4410,7 +4329,7 @@ public class PersistentTopicsBase extends AdminResource {
                                 "Partitioned Topic not found: %s %s", topicName.toString(), topicErrorType));
                     }
                 })
-                .thenCompose(__ -> internalGetListAsync(Optional.empty()))
+                .thenCompose(__ -> internalGetListAsync(Optional.empty(), null))
                 .thenApply(topics -> {
                     if (!topics.contains(topicName.toString())) {
                         throw new RestException(Status.NOT_FOUND, "Topic partitions were not yet created");
@@ -4630,12 +4549,13 @@ public class PersistentTopicsBase extends AdminResource {
                 futures.add(pulsar().getAdminClient().topics().trimTopicAsync(topicNamePartition.toString()));
             } catch (Exception e) {
                 log.error("[{}] Failed to trim topic {}", clientAppId(), topicNamePartition, e);
-                throw new RestException(e);
+                return FutureUtil.failedFuture(new RestException(e));
             }
         }
         return FutureUtil.waitForAll(futures).thenAccept(asyncResponse::resume);
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<DispatchRateImpl> internalGetDispatchRate(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getDispatchRate)
@@ -4664,6 +4584,7 @@ public class PersistentTopicsBase extends AdminResource {
         });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<DispatchRate> internalGetSubscriptionDispatchRate(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getSubscriptionDispatchRate)
@@ -4744,7 +4665,8 @@ public class PersistentTopicsBase extends AdminResource {
     protected CompletableFuture<Void> internalSetMaxConsumersPerSubscription(
             Integer maxConsumersPerSubscriptionToSet, boolean isGlobal) {
         if (maxConsumersPerSubscriptionToSet != null && maxConsumersPerSubscriptionToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED, "Invalid value for maxConsumersPerSubscription");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "Invalid value for maxConsumersPerSubscription"));
         }
         return pulsar().getTopicPoliciesService().updateTopicPoliciesAsync(topicName, isGlobal, false, policies -> {
             policies.setMaxConsumersPerSubscription(maxConsumersPerSubscriptionToSet);
@@ -4757,6 +4679,7 @@ public class PersistentTopicsBase extends AdminResource {
         });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Long> internalGetCompactionThreshold(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getCompactionThreshold)
@@ -4773,7 +4696,8 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected CompletableFuture<Void> internalSetCompactionThreshold(Long compactionThresholdToSet, boolean isGlobal) {
         if (compactionThresholdToSet != null && compactionThresholdToSet < 0) {
-            throw new RestException(Status.PRECONDITION_FAILED, "Invalid value for compactionThreshold");
+            return FutureUtil.failedFuture(new RestException(Status.PRECONDITION_FAILED,
+                    "Invalid value for compactionThreshold"));
         }
 
         return pulsar().getTopicPoliciesService().updateTopicPoliciesAsync(topicName, isGlobal, false, policies -> {
@@ -4828,6 +4752,7 @@ public class PersistentTopicsBase extends AdminResource {
         });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<SubscribeRate> internalGetSubscribeRate(boolean applied, boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
             .thenApply(op -> op.map(TopicPolicies::getSubscribeRate)
@@ -4909,13 +4834,6 @@ public class PersistentTopicsBase extends AdminResource {
         if (!topicName.isPersistent()) {
             asyncResponse.resume(new RestException(Status.METHOD_NOT_ALLOWED,
                     "Cannot enable/disable replicated subscriptions on non-persistent topics"));
-            return;
-        }
-
-        // Reject the request if the topic is not global
-        if (!topicName.isGlobal()) {
-            asyncResponse.resume(new RestException(Status.METHOD_NOT_ALLOWED,
-                    "Cannot enable/disable replicated subscriptions on non-global topics"));
             return;
         }
 
@@ -5049,13 +4967,6 @@ public class PersistentTopicsBase extends AdminResource {
         if (!topicName.isPersistent()) {
             asyncResponse.resume(new RestException(Status.METHOD_NOT_ALLOWED,
                     "Cannot get replicated subscriptions on non-persistent topics"));
-            return;
-        }
-
-        // Reject the request if the topic is not global
-        if (!topicName.isGlobal()) {
-            asyncResponse.resume(new RestException(Status.METHOD_NOT_ALLOWED,
-                    "Cannot get replicated subscriptions on non-global topics"));
             return;
         }
 
@@ -5203,6 +5114,7 @@ public class PersistentTopicsBase extends AdminResource {
                         });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<Boolean> internalGetSchemaValidationEnforced(boolean applied) {
         // Schema validation enforced is typically a local policy
         return getTopicPoliciesAsyncWithRetry(topicName)
@@ -5322,6 +5234,7 @@ public class PersistentTopicsBase extends AdminResource {
                         });
     }
 
+    @SuppressWarnings("deprecation")
     protected CompletableFuture<AutoSubscriptionCreationOverride> internalGetAutoSubscriptionCreation(boolean applied,
                                                                                                     boolean isGlobal) {
         return getTopicPoliciesAsyncWithRetry(topicName, isGlobal)
@@ -5347,14 +5260,9 @@ public class PersistentTopicsBase extends AdminResource {
                     "Invalid message index: " + index));
         }
         int partitionIndex = topicName.getPartitionIndex();
-        CompletableFuture<Void> future = validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES);
-        return future.thenCompose(__ -> {
-                    if (topicName.isGlobal()) {
-                        return validateGlobalNamespaceOwnershipAsync(namespaceName);
-                    } else {
-                        return CompletableFuture.completedFuture(null);
-                    }
-                }).thenCompose(__ -> {
+        return validateTopicOperationAsync(topicName, TopicOperation.PEEK_MESSAGES)
+                .thenCompose(__ -> validateGlobalNamespaceOwnershipAsync(namespaceName))
+                .thenCompose(__ -> {
                     if (topicName.isPartitioned()) {
                         return CompletableFuture.completedFuture(null);
                     } else {

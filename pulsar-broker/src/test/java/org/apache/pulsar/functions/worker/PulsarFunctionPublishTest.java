@@ -117,6 +117,7 @@ public class PulsarFunctionPublishTest {
     public Object[][] validRoleName() {
         return new Object[][]{{Boolean.TRUE}, {Boolean.FALSE}};
     }
+    @SuppressWarnings("deprecation")
 
     @BeforeMethod
     void setup(Method method) throws Exception {
@@ -245,6 +246,7 @@ public class PulsarFunctionPublishTest {
             }
         }
     }
+    @SuppressWarnings({"deprecation", "unchecked"})
 
     private PulsarWorkerService createPulsarFunctionWorker(ServiceConfiguration config) {
 
@@ -291,6 +293,7 @@ public class PulsarFunctionPublishTest {
         PulsarWorkerService workerService = new PulsarWorkerService();
         return workerService;
     }
+    @SuppressWarnings("deprecation")
 
     protected static FunctionConfig createFunctionConfig(String tenant, String namespace, String functionName,
                                                      String sourceTopic, String publishTopic, String subscriptionName) {
@@ -326,7 +329,7 @@ public class PulsarFunctionPublishTest {
         final String subscriptionName = "test-sub";
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
 
         // create a producer that creates a topic at broker
         Producer<String> producer = pulsarClient.newProducer(Schema.STRING).topic(sourceTopic).create();
@@ -404,6 +407,7 @@ public class PulsarFunctionPublishTest {
 
         tempDirectory.assertThatFunctionDownloadTempFilesHaveBeenDeleted();
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testMultipleAddress() throws Exception {
@@ -415,7 +419,7 @@ public class PulsarFunctionPublishTest {
         final String subscriptionName = "test-sub";
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
 
         FunctionConfig functionConfig = createFunctionConfig(tenant, namespacePortion, functionName,
                 sourceTopic, publishTopic, subscriptionName);
@@ -468,7 +472,7 @@ public class PulsarFunctionPublishTest {
         final String subscriptionName = "test-sub";
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
 
         // create a producer that creates a topic at broker
         Producer<String> producer = pulsarClient.newProducer(Schema.STRING).topic(sourceTopic).create();
@@ -585,7 +589,7 @@ public class PulsarFunctionPublishTest {
         final String subscriptionName = "test-sub";
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
 
         FunctionConfig functionConfig = createFunctionConfig(tenant, namespacePortion, functionName,
                 sourceTopic, publishTopic, subscriptionName);

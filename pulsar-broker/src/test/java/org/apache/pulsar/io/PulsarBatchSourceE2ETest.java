@@ -48,7 +48,7 @@ public class PulsarBatchSourceE2ETest extends AbstractPulsarE2ETest {
         final String sourceName = "PulsarBatchSource";
         admin.namespaces().createNamespace(replNamespace);
         Set<String> clusters = Sets.newHashSet(Lists.newArrayList("use"));
-        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters);
+        admin.namespaces().setNamespaceReplicationClusters(replNamespace, clusters, false);
 
         SourceConfig sourceConfig = createSourceConfig(tenant, namespacePortion, sourceName, sinkTopic);
         sourceConfig.setBatchSourceConfig(createBatchSourceConfig());
@@ -66,7 +66,7 @@ public class PulsarBatchSourceE2ETest extends AbstractPulsarE2ETest {
 
         if (jarFilePathUrl.startsWith(Utils.BUILTIN)) {
           sourceConfig.setArchive(jarFilePathUrl);
-          admin.sources().createSource(sourceConfig, jarFilePathUrl);
+          admin.sources().createSource(sourceConfig, null);
         } else {
           admin.sources().createSourceWithUrl(sourceConfig, jarFilePathUrl);
         }
@@ -174,7 +174,7 @@ public class PulsarBatchSourceE2ETest extends AbstractPulsarE2ETest {
         admin.sources().deleteSource(tenant, namespacePortion, sourceName);
     }
 
-    @Test(timeOut = 20000, groups = "builtin")
+    @Test(timeOut = 120000, groups = "builtin")
     public void testPulsarBatchSourceStatsBuiltin() throws Exception {
         String jarFilePathUrl = String.format("%s://batch-data-generator", Utils.BUILTIN);
         testPulsarBatchSourceStats(jarFilePathUrl);

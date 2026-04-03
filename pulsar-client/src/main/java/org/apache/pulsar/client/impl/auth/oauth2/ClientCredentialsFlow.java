@@ -47,6 +47,7 @@ import org.apache.pulsar.client.impl.auth.oauth2.protocol.TokenResult;
 class ClientCredentialsFlow extends FlowBase {
     public static final String CONFIG_PARAM_ISSUER_URL = "issuerUrl";
     public static final String CONFIG_PARAM_AUDIENCE = "audience";
+    // Maps to the keyFileUrl
     public static final String CONFIG_PARAM_KEY_FILE = "privateKey";
     public static final String CONFIG_PARAM_SCOPE = "scope";
 
@@ -62,12 +63,14 @@ class ClientCredentialsFlow extends FlowBase {
 
     @Builder
     public ClientCredentialsFlow(URL issuerUrl, String audience, String privateKey, String scope,
-                                 Duration connectTimeout, Duration readTimeout, String trustCertsFilePath) {
-        super(issuerUrl, connectTimeout, readTimeout, trustCertsFilePath);
+                                 Duration connectTimeout, Duration readTimeout, String trustCertsFilePath,
+                                 String wellKnownMetadataPath) {
+        super(issuerUrl, connectTimeout, readTimeout, trustCertsFilePath, wellKnownMetadataPath);
         this.audience = audience;
         this.privateKey = privateKey;
         this.scope = scope;
     }
+
 
     /**
      * Constructs a {@link ClientCredentialsFlow} from configuration parameters.
@@ -84,6 +87,7 @@ class ClientCredentialsFlow extends FlowBase {
         Duration connectTimeout = parseParameterDuration(params, CONFIG_PARAM_CONNECT_TIMEOUT);
         Duration readTimeout = parseParameterDuration(params, CONFIG_PARAM_READ_TIMEOUT);
         String trustCertsFilePath = params.get(CONFIG_PARAM_TRUST_CERTS_FILE_PATH);
+        String wellKnownMetadataPath = params.get(CONFIG_PARAM_WELL_KNOWN_METADATA_PATH);
 
         return ClientCredentialsFlow.builder()
                 .issuerUrl(issuerUrl)
@@ -93,6 +97,7 @@ class ClientCredentialsFlow extends FlowBase {
                 .connectTimeout(connectTimeout)
                 .readTimeout(readTimeout)
                 .trustCertsFilePath(trustCertsFilePath)
+                .wellKnownMetadataPath(wellKnownMetadataPath)
                 .build();
     }
 

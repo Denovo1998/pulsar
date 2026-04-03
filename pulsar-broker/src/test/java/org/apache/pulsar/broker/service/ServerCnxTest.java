@@ -74,6 +74,7 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.naming.AuthenticationException;
 import lombok.AllArgsConstructor;
+import lombok.Cleanup;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.AddEntryCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.CloseCallback;
@@ -187,14 +188,13 @@ public class ServerCnxTest {
     private final int currentProtocolVersion = ProtocolVersion.values()[ProtocolVersion.values().length - 1]
             .getValue();
 
-    protected final String successTopicName = "persistent://prop/use/ns-abc/successTopic";
-    private final String failTopicName = "persistent://prop/use/ns-abc/failTopic";
-    private final String nonOwnedTopicName = "persistent://prop/use/ns-abc/success-not-owned-topic";
-    private final String encryptionRequiredTopicName = "persistent://prop/use/ns-abc/successEncryptionRequiredTopic";
+    protected final String successTopicName = "persistent://prop/ns-abc/successTopic";
+    private final String failTopicName = "persistent://prop/ns-abc/failTopic";
+    private final String nonOwnedTopicName = "persistent://prop/ns-abc/success-not-owned-topic";
+    private final String encryptionRequiredTopicName = "persistent://prop/ns-abc/successEncryptionRequiredTopic";
     private final String successSubName = "successSub";
     private final String nonExistentTopicName =
-            "persistent://nonexistent-prop/nonexistent-cluster/nonexistent-namespace/successNonExistentTopic";
-    private final String topicWithNonLocalCluster = "persistent://prop/usw/ns-abc/successTopic";
+            "persistent://nonexistent-prop/nonexistent-namespace/successNonExistentTopic";
     private final List<String> matchingTopics = Arrays.asList(
             "persistent://use/ns-abc/topic-1",
             "persistent://use/ns-abc/topic-2");
@@ -232,12 +232,16 @@ public class ServerCnxTest {
                 .getBundleAsync(any());
         doReturn(CompletableFuture.completedFuture(true)).when(namespaceService).checkBundleOwnership(any(), any());
         doReturn(true).when(namespaceService).isServiceUnitOwned(any());
-        doReturn(CompletableFuture.completedFuture(topics)).when(namespaceService).getListOfTopics(
-                NamespaceName.get("use", "ns-abc"), CommandGetTopicsOfNamespace.Mode.ALL);
+        doReturn(CompletableFuture.completedFuture(topics)).when(namespaceService).getListOfTopicsByProperties(
+                eq(NamespaceName.get("use", "ns-abc")), eq(CommandGetTopicsOfNamespace.Mode.ALL), any());
+        doReturn(CompletableFuture.completedFuture(topics)).when(namespaceService).getListOfUserTopicsByProperties(
+                eq(NamespaceName.get("use", "ns-abc")), any(), any());
         doReturn(CompletableFuture.completedFuture(topics)).when(namespaceService).getListOfUserTopics(
-                NamespaceName.get("use", "ns-abc"), CommandGetTopicsOfNamespace.Mode.ALL);
+            eq(NamespaceName.get("use", "ns-abc")), any());
+        doReturn(CompletableFuture.completedFuture(topics)).when(namespaceService).getListOfTopics(
+            eq(NamespaceName.get("use", "ns-abc")), any());
         doReturn(CompletableFuture.completedFuture(topics)).when(namespaceService).getListOfPersistentTopics(
-                NamespaceName.get("use", "ns-abc"));
+            eq(NamespaceName.get("use", "ns-abc")));
         doReturn(CompletableFuture.completedFuture(TopicExistsInfo.newTopicNotExists())).when(namespaceService)
                 .checkTopicExistsAsync(any());
 
@@ -1073,6 +1077,7 @@ public class ServerCnxTest {
         channel.finish();
         channel2.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testHandleConsumerAfterClientChannelInactive() throws Exception {
@@ -1114,6 +1119,7 @@ public class ServerCnxTest {
         channel.finish();
         channel2.close();
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void test2ndSubFailedIfDisabledConCheck()
@@ -1710,13 +1716,6 @@ public class ServerCnxTest {
                 "prod-name", Collections.emptyMap(), false);
         channel.writeInbound(clientCommand);
         assertTrue(getResponse() instanceof CommandProducerSuccess);
-
-        resetChannel();
-        setChannelConnected();
-        clientCommand = Commands.newProducer(topicWithNonLocalCluster, 1 /* producer id */, 1 /* request id */,
-                "prod-name", Collections.emptyMap(), false);
-        channel.writeInbound(clientCommand);
-        assertTrue(getResponse() instanceof CommandError);
         channel.finish();
     }
 
@@ -2384,7 +2383,10 @@ public class ServerCnxTest {
             assertEquals(((CommandError) response).getRequestId(), 5);
 
             // We should receive response for 1st producer, since it was not cancelled by the close
-            Awaitility.await().untilAsserted(() -> assertFalse(channel.outboundMessages().isEmpty()));
+            Awaitility.await().untilAsserted(() -> {
+                channel.runPendingTasks();
+                assertFalse(channel.outboundMessages().isEmpty());
+            });
 
             assertTrue(channel.isActive());
             response = getResponse();
@@ -2639,6 +2641,7 @@ public class ServerCnxTest {
         assertNull(channel.outboundMessages().peek());
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testProducerSuccessOnEncryptionRequiredTopic() throws Exception {
@@ -2677,6 +2680,7 @@ public class ServerCnxTest {
 
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testProducerFailureOnEncryptionRequiredTopic() throws Exception {
@@ -2717,6 +2721,7 @@ public class ServerCnxTest {
 
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testProducerFailureOnEncryptionRequiredOnBroker() throws Exception {
@@ -2759,6 +2764,7 @@ public class ServerCnxTest {
 
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testSendSuccessOnEncryptionRequiredTopic() throws Exception {
@@ -2805,6 +2811,7 @@ public class ServerCnxTest {
         assertTrue(getResponse() instanceof CommandSendReceipt);
         channel.finish();
     }
+    @SuppressWarnings("deprecation")
 
     @Test(timeOut = 30000)
     public void testSendFailureOnEncryptionRequiredTopic() throws Exception {
@@ -2892,6 +2899,8 @@ public class ServerCnxTest {
         final long sleepTimeMs = 10;
         final long iterations = TimeUnit.SECONDS.toMillis(10) / sleepTimeMs;
         for (int i = 0; i < iterations; i++) {
+            // Execute tasks submitted to ctx.executor() via thenAcceptAsync/thenRunAsync etc.
+            channel.runPendingTasks();
             if (!channel.outboundMessages().isEmpty()) {
                 Object outObject = channel.outboundMessages().remove();
                 Object cmd = clientChannelHelper.getCommand(outObject);
@@ -3160,7 +3169,7 @@ public class ServerCnxTest {
         resetChannel();
         setChannelConnected();
         ByteBuf clientCommand = Commands.newGetTopicsOfNamespaceRequest(
-                "use/ns-abc", 1, CommandGetTopicsOfNamespace.Mode.ALL, null, null);
+                "use/ns-abc", 1, CommandGetTopicsOfNamespace.Mode.ALL, null, null, null);
         channel.writeInbound(clientCommand);
         CommandGetTopicsOfNamespaceResponse response = (CommandGetTopicsOfNamespaceResponse) getResponse();
 
@@ -3179,7 +3188,7 @@ public class ServerCnxTest {
         setChannelConnected();
         ByteBuf clientCommand = Commands.newGetTopicsOfNamespaceRequest(
                 "use/ns-abc", 1, CommandGetTopicsOfNamespace.Mode.ALL,
-                "use/ns-abc/topic-.*", null);
+                "use/ns-abc/topic-.*", null, null);
         channel.writeInbound(clientCommand);
         CommandGetTopicsOfNamespaceResponse response = (CommandGetTopicsOfNamespaceResponse) getResponse();
 
@@ -3199,7 +3208,7 @@ public class ServerCnxTest {
         setChannelConnected();
         ByteBuf clientCommand = Commands.newGetTopicsOfNamespaceRequest(
                 "use/ns-abc", 1, CommandGetTopicsOfNamespace.Mode.ALL,
-                "use/ns-abc/(t|o|to|p|i|c)+-?)+!", null);
+                "use/ns-abc/(t|o|to|p|i|c)+-?)+!", null, null);
         channel.writeInbound(clientCommand);
         CommandGetTopicsOfNamespaceResponse response = (CommandGetTopicsOfNamespaceResponse) getResponse();
 
@@ -3218,7 +3227,7 @@ public class ServerCnxTest {
         setChannelConnected();
         ByteBuf clientCommand = Commands.newGetTopicsOfNamespaceRequest(
                 "use/ns-abc", 1, CommandGetTopicsOfNamespace.Mode.ALL,
-                "use/ns-abc/topic-.*", "SOME_HASH");
+                "use/ns-abc/topic-.*", "SOME_HASH", null);
         channel.writeInbound(clientCommand);
         CommandGetTopicsOfNamespaceResponse response = (CommandGetTopicsOfNamespaceResponse) getResponse();
 
@@ -3237,7 +3246,7 @@ public class ServerCnxTest {
         setChannelConnected();
         ByteBuf clientCommand = Commands.newGetTopicsOfNamespaceRequest(
                 "use/ns-abc", 1, CommandGetTopicsOfNamespace.Mode.ALL,
-                "use/ns-abc/topic-.*", TopicList.calculateHash(matchingTopics));
+                "use/ns-abc/topic-.*", TopicList.calculateHash(matchingTopics), null);
         channel.writeInbound(clientCommand);
         CommandGetTopicsOfNamespaceResponse response = (CommandGetTopicsOfNamespaceResponse) getResponse();
 
@@ -3253,6 +3262,8 @@ public class ServerCnxTest {
     public void testWatchTopicList() throws Exception {
         svcConfig.setEnableBrokerSideSubscriptionPatternEvaluation(true);
         resetChannel();
+        @Cleanup
+        BackGroundExecutor backGroundExecutor = startBackgroundExecutorForEmbeddedChannel(channel);
         setChannelConnected();
         BaseCommand command = Commands.newWatchTopicList(1, 3, "use/ns-abc", "use/ns-abc/topic-.*", null);
         ByteBuf serializedCommand = Commands.serializeWithSize(command);
@@ -3411,6 +3422,7 @@ public class ServerCnxTest {
             channel.finish();
         }
     }
+    @SuppressWarnings("deprecation")
 
     @Test
     public void testHandleAuthResponseWithoutClientVersion() throws Exception {
