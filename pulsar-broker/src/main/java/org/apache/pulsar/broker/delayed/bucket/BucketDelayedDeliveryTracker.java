@@ -57,7 +57,6 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.apache.pulsar.broker.delayed.AbstractDelayedDeliveryTracker;
 import org.apache.pulsar.broker.delayed.DelayedDeliveryContext;
 import org.apache.pulsar.broker.delayed.DispatcherDelayedDeliveryContext;
-import org.apache.pulsar.broker.delayed.NoopDelayedDeliveryContext;
 import org.apache.pulsar.broker.delayed.proto.DelayedIndex;
 import org.apache.pulsar.broker.delayed.proto.SnapshotSegment;
 import org.apache.pulsar.broker.service.persistent.AbstractPersistentDispatcherMultipleConsumers;
@@ -139,30 +138,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 timeStepPerBucketSnapshotSegmentInMillis, maxIndexesPerBucketSnapshotSegment, maxNumBuckets);
     }
 
-    public BucketDelayedDeliveryTracker(String dispatcherName, ManagedCursor cursor,
-                                        Timer timer, long tickTimeMillis,
-                                        boolean isDelayedDeliveryDeliverAtTimeStrict,
-                                        BucketSnapshotStorage bucketSnapshotStorage,
-                                        long minIndexCountPerBucket, long timeStepPerBucketSnapshotSegmentInMillis,
-                                        int maxIndexesPerBucketSnapshotSegment, int maxNumBuckets)
-            throws RecoverDelayedDeliveryTrackerException {
-        this(new NoopDelayedDeliveryContext(dispatcherName, cursor), timer, tickTimeMillis, Clock.systemUTC(),
-                isDelayedDeliveryDeliverAtTimeStrict, bucketSnapshotStorage, minIndexCountPerBucket,
-                timeStepPerBucketSnapshotSegmentInMillis, maxIndexesPerBucketSnapshotSegment, maxNumBuckets);
-    }
-
-    public BucketDelayedDeliveryTracker(DelayedDeliveryContext context,
-                                        Timer timer, long tickTimeMillis,
-                                        boolean isDelayedDeliveryDeliverAtTimeStrict,
-                                        BucketSnapshotStorage bucketSnapshotStorage,
-                                        long minIndexCountPerBucket, long timeStepPerBucketSnapshotSegmentInMillis,
-                                        int maxIndexesPerBucketSnapshotSegment, int maxNumBuckets)
-            throws RecoverDelayedDeliveryTrackerException {
-        this(context, timer, tickTimeMillis, Clock.systemUTC(), isDelayedDeliveryDeliverAtTimeStrict,
-                bucketSnapshotStorage, minIndexCountPerBucket, timeStepPerBucketSnapshotSegmentInMillis,
-                maxIndexesPerBucketSnapshotSegment, maxNumBuckets);
-    }
-
+    @VisibleForTesting
     public BucketDelayedDeliveryTracker(DelayedDeliveryContext context,
                                         Timer timer, long tickTimeMillis, Clock clock,
                                         boolean isDelayedDeliveryDeliverAtTimeStrict,
