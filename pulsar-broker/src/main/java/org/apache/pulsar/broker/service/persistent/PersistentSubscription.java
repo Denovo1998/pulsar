@@ -72,6 +72,9 @@ import org.apache.pulsar.broker.service.GetStatsOptions;
 import org.apache.pulsar.broker.service.StickyKeyDispatcher;
 import org.apache.pulsar.broker.service.Subscription;
 import org.apache.pulsar.broker.service.Topic;
+import org.apache.pulsar.broker.service.trace.TopicTraceContext;
+import org.apache.pulsar.broker.service.trace.TopicTraceEventType;
+import org.apache.pulsar.broker.service.trace.TopicTraceOperation;
 import org.apache.pulsar.broker.service.plugin.EntryFilter;
 import org.apache.pulsar.broker.transaction.pendingack.PendingAckHandle;
 import org.apache.pulsar.broker.transaction.pendingack.impl.PendingAckHandleDisabled;
@@ -118,6 +121,11 @@ public class PersistentSubscription extends AbstractSubscription {
     private static final int MINIMUM_BACKLOG_FOR_EXPIRY_CHECK = 1000;
 
     protected static final String REPLICATED_SUBSCRIPTION_PROPERTY = "pulsar.replicated.subscription";
+
+    private TopicTraceOperation newTopicTraceOperation(TopicTraceEventType eventType) {
+        return topic.getBrokerService().getTopicTraceManager().newOperation(TopicName.get(topicName), eventType,
+                TopicTraceContext.internal()).subscription(subName);
+    }
 
     // Map of properties that is used to mark this subscription as "replicated".
     // Since this is the only field at this point, we can just keep a static
@@ -757,6 +765,9 @@ public class PersistentSubscription extends AbstractSubscription {
     @Override
     public CompletableFuture<Void> clearBacklog() {
         CompletableFuture<Void> future = new CompletableFuture<>();
+        long backlogBefore = cursor.getNumberOfEntriesInBacklog(false);
+        TopicTraceOperation traceOperation = newTopicTraceOperation(TopicTraceEventType.SUBSCRIPTION_CLEAR_BACKLOG);
+        traceOperation.before("Subscription clear backlog started", Map.of("backlogBefore", backlogBefore));
 
         if (log.isDebugEnabled()) {
             log.debug("[{}][{}] Backlog size before clearing: {}", topicName, subName,
@@ -770,16 +781,23 @@ public class PersistentSubscription extends AbstractSubscription {
                     log.debug("[{}][{}] Backlog size after clearing: {}", topicName, subName,
                             cursor.getNumberOfEntriesInBacklog(false));
                 }
+                long backlogAfter = cursor.getNumberOfEntriesInBacklog(false);
                 if (dispatcher != null) {
                     dispatcher.clearDelayedMessages().whenComplete((__, ex) -> {
                         if (ex != null) {
+                            traceOperation.failure(ex, "Subscription clear backlog failed",
+                                    Map.of("backlogBefore", backlogBefore, "backlogAfter", backlogAfter));
                             future.completeExceptionally(ex);
                         } else {
+                            traceOperation.success("Subscription backlog cleared",
+                                    Map.of("backlogBefore", backlogBefore, "backlogAfter", backlogAfter));
                             future.complete(null);
                         }
                     });
                     dispatcher.afterAckMessages(null, ctx);
                 } else {
+                    traceOperation.success("Subscription backlog cleared",
+                            Map.of("backlogBefore", backlogBefore, "backlogAfter", backlogAfter));
                     future.complete(null);
                 }
             }
@@ -787,6 +805,8 @@ public class PersistentSubscription extends AbstractSubscription {
             @Override
             public void clearBacklogFailed(ManagedLedgerException exception, Object ctx) {
                 log.error("[{}][{}] Failed to clear backlog", topicName, subName, exception);
+                traceOperation.failure(exception, "Subscription clear backlog failed",
+                        Map.of("backlogBefore", backlogBefore));
                 future.completeExceptionally(exception);
                 if (dispatcher != null) {
                     dispatcher.afterAckMessages(exception, ctx);
@@ -1177,6 +1197,8 @@ public class PersistentSubscription extends AbstractSubscription {
      */
     private CompletableFuture<Void> delete(boolean closeIfConsumersConnected) {
         CompletableFuture<Void> deleteFuture = new CompletableFuture<>();
+        TopicTraceOperation traceOperation = newTopicTraceOperation(TopicTraceEventType.SUBSCRIPTION_DELETE);
+        traceOperation.before("Subscription delete started", Map.of("force", closeIfConsumersConnected));
 
         log.info("[{}][{}] Unsubscribing", topicName, subName);
 
@@ -1205,6 +1227,7 @@ public class PersistentSubscription extends AbstractSubscription {
             synchronized (this) {
                 (dispatcher != null ? dispatcher.close() : CompletableFuture.completedFuture(null)).thenRun(() -> {
                     log.info("[{}][{}] Successfully deleted subscription", topicName, subName);
+                    traceOperation.success("Subscription deleted", Map.of("force", closeIfConsumersConnected));
                     deleteFuture.complete(null);
                 }).exceptionally(ex -> {
                     IS_FENCED_UPDATER.set(this, FALSE);
@@ -1212,6 +1235,8 @@ public class PersistentSubscription extends AbstractSubscription {
                         dispatcher.reset();
                     }
                     log.error("[{}][{}] Error deleting subscription", topicName, subName, ex);
+                    traceOperation.failure(ex, "Subscription delete failed",
+                            Map.of("force", closeIfConsumersConnected));
                     deleteFuture.completeExceptionally(ex);
                     return null;
                 });
@@ -1219,6 +1244,8 @@ public class PersistentSubscription extends AbstractSubscription {
         }).exceptionally(exception -> {
             IS_FENCED_UPDATER.set(this, FALSE);
             log.error("[{}][{}] Error deleting subscription", topicName, subName, exception);
+            traceOperation.failure(exception, "Subscription delete failed",
+                    Map.of("force", closeIfConsumersConnected));
             deleteFuture.completeExceptionally(exception);
             return null;
         });
@@ -1286,7 +1313,13 @@ public class PersistentSubscription extends AbstractSubscription {
             return false;
         }
         this.lastExpireTimestamp = System.currentTimeMillis();
-        return expiryMonitor.expireMessages(messageTTLInSeconds);
+        boolean expired = expiryMonitor.expireMessages(messageTTLInSeconds);
+        if (expired) {
+            newTopicTraceOperation(TopicTraceEventType.MESSAGE_EXPIRE)
+                    .success("Message expiry started",
+                            Map.of("messageTTLInSeconds", messageTTLInSeconds, "backlog", backlog));
+        }
+        return expired;
     }
 
     @Override
@@ -1300,19 +1333,39 @@ public class PersistentSubscription extends AbstractSubscription {
                 .thenCompose(oldestMsgExpired -> {
                     if (oldestMsgExpired) {
                         this.lastExpireTimestamp = System.currentTimeMillis();
-                        return expiryMonitor.expireMessagesAsync(messageTTLInSeconds);
+                        return expiryMonitor.expireMessagesAsync(messageTTLInSeconds).thenApply(expired -> {
+                            if (expired) {
+                                newTopicTraceOperation(TopicTraceEventType.MESSAGE_EXPIRE)
+                                        .success("Message expiry started",
+                                                Map.of("messageTTLInSeconds", messageTTLInSeconds,
+                                                        "backlog", backlog));
+                            }
+                            return expired;
+                        });
                     } else {
                         return CompletableFuture.completedFuture(false);
                     }
             });
         }
-        return expiryMonitor.expireMessagesAsync(messageTTLInSeconds);
+        return expiryMonitor.expireMessagesAsync(messageTTLInSeconds).thenApply(expired -> {
+            if (expired) {
+                newTopicTraceOperation(TopicTraceEventType.MESSAGE_EXPIRE)
+                        .success("Message expiry started",
+                                Map.of("messageTTLInSeconds", messageTTLInSeconds, "backlog", backlog));
+            }
+            return expired;
+        });
     }
 
     @Override
     public boolean expireMessages(Position position) {
         this.lastExpireTimestamp = System.currentTimeMillis();
-        return expiryMonitor.expireMessages(position);
+        boolean expired = expiryMonitor.expireMessages(position);
+        if (expired) {
+            newTopicTraceOperation(TopicTraceEventType.MESSAGE_EXPIRE)
+                    .success("Message expiry started", Map.of("position", position.toString()));
+        }
+        return expired;
     }
 
     public double getExpiredMessageRate() {

@@ -2026,6 +2026,9 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                         log.warn("[{}] Error when closing ledger {}, trigger by rollover full ledger, Status={}",
                                 name, lh.getId(), BKException.getMessage(rc));
                     }
+                    if (rc == BKException.Code.OK && managedLedgerInterceptor != null) {
+                        managedLedgerInterceptor.onLedgerRolled(name, lh.getId());
+                    }
 
                     ledgerClosed(lh);
                 }
@@ -3175,6 +3178,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                     ledgersStat = stat;
                     metadataMutex.unlock();
                     trimmerMutex.unlock();
+                    if (managedLedgerInterceptor != null && !ledgersToDelete.isEmpty()) {
+                        managedLedgerInterceptor.onLedgersPurged(name, ledgersToDelete.size(),
+                                ledgersToDelete.get(0).getLedgerId(),
+                                ledgersToDelete.get(ledgersToDelete.size() - 1).getLedgerId());
+                    }
 
                     for (LedgerInfo ls : ledgersToDelete) {
                         log.info("[{}] Removing ledger {} - size: {}", name, ls.getLedgerId(), ls.getSize());

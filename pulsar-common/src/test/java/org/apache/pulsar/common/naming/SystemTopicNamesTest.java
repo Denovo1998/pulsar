@@ -41,6 +41,24 @@ public class SystemTopicNamesTest {
     @Test(dataProvider = "topicPoliciesSystemTopicNames")
     public void testIsTopicPoliciesSystemTopic(String topicName, boolean expectedResult) {
         assertEquals(expectedResult, SystemTopicNames.isTopicPoliciesSystemTopic(topicName));
+    }
+
+    @DataProvider(name = "topicTraceSystemTopicNames")
+    public static Object[][] topicTraceSystemTopicNames() {
+        return new Object[][] {
+                {"persistent://public/default/__topic_trace_events", true},
+                {"persistent://public/default/__topic_trace_events-partition-0", true},
+                {"persistent://random-tenant/random-ns/__topic_trace_events", true},
+                {"persistent://random-tenant/random-ns/__topic_trace_events-partition-1", true},
+                {"persistent://public/default/not_really__topic_trace_events", false},
+                {"persistent://public/default/__topic_trace_events-diff-suffix", false},
+                {"persistent://a/b/not_really__topic_trace_events", false},
+        };
+    }
+
+    @Test(dataProvider = "topicTraceSystemTopicNames")
+    public void testIsTopicTraceSystemTopic(String topicName, boolean expectedResult) {
+        assertEquals(expectedResult, SystemTopicNames.isTopicTraceSystemTopic(topicName));
         assertEquals(expectedResult, SystemTopicNames.isSystemTopic(TopicName.get(topicName)));
         assertEquals(expectedResult, SystemTopicNames.isEventSystemTopic(TopicName.get(topicName)));
     }

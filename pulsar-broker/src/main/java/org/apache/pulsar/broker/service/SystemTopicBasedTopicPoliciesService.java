@@ -47,6 +47,9 @@ import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.namespace.NamespaceBundleOwnershipListener;
 import org.apache.pulsar.broker.namespace.NamespaceService;
+import org.apache.pulsar.broker.service.trace.TopicTraceContext;
+import org.apache.pulsar.broker.service.trace.TopicTraceEventType;
+import org.apache.pulsar.broker.service.trace.TopicTraceOperation;
 import org.apache.pulsar.broker.systopic.NamespaceEventsSystemTopicFactory;
 import org.apache.pulsar.broker.systopic.SystemTopicClient;
 import org.apache.pulsar.client.api.Message;
@@ -251,6 +254,13 @@ public class SystemTopicBasedTopicPoliciesService implements TopicPoliciesServic
                                                         + "requested", topicName);
                                                 return CompletableFuture.completedFuture(null);
                                             }
+                                            TopicTraceOperation traceOperation = pulsarService.getBrokerService()
+                                                    .getTopicTraceManager()
+                                                    .newOperation(partitionedTopicName,
+                                                            TopicTraceEventType.POLICIES_UPDATE,
+                                                            TopicTraceContext.internal());
+                                            traceOperation.before("Topic policies update started",
+                                                    currentPolicies.orElse(null));
                                             TopicPolicies policiesToUpdate;
                                             if (actionType == ActionType.DELETE) {
                                                 policiesToUpdate = null; // For delete, policies object is null
@@ -261,16 +271,30 @@ public class SystemTopicBasedTopicPoliciesService implements TopicPoliciesServic
                                                 policyUpdater.accept(policiesToUpdate);
                                             }
                                             return sendTopicPolicyEventInternal(topicName, actionType, policiesToUpdate,
-                                                    isGlobalPolicy);
-                                        })
-                                        .thenCompose(messageId -> {
-                                            if (messageId == null) {
-                                                return CompletableFuture.completedFuture(null);
-                                            } else {
-                                                // asynchronously wait until the message ID is read by the reader
-                                                return untilMessageIdHasBeenRead(topicName.getNamespaceObject(),
-                                                        messageId);
-                                            }
+                                                    isGlobalPolicy).thenCompose(messageId -> {
+                                                        if (messageId == null) {
+                                                            return CompletableFuture.completedFuture(null);
+                                                        } else {
+                                                            // asynchronously wait until the message ID is read by
+                                                            // the reader
+                                                            return untilMessageIdHasBeenRead(
+                                                                    topicName.getNamespaceObject(), messageId);
+                                                        }
+                                                    }).whenComplete((__, ex) -> {
+                                                        if (ex == null) {
+                                                            traceOperation.success("Topic policies updated",
+                                                                    currentPolicies.orElse(null), policiesToUpdate,
+                                                                    Map.of("actionType", actionType.name(),
+                                                                            "isGlobalPolicy", isGlobalPolicy));
+                                                        } else {
+                                                            traceOperation.failure(
+                                                                    FutureUtil.unwrapCompletionException(ex),
+                                                                    "Topic policies update failed",
+                                                                    currentPolicies.orElse(null), policiesToUpdate,
+                                                                    Map.of("actionType", actionType.name(),
+                                                                            "isGlobalPolicy", isGlobalPolicy));
+                                                        }
+                                                    });
                                         });
                             }));
         }).whenComplete((res, ex) -> {

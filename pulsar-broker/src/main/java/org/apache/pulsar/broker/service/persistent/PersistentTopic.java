@@ -134,6 +134,9 @@ import org.apache.pulsar.broker.service.SubscriptionOption;
 import org.apache.pulsar.broker.service.Topic;
 import org.apache.pulsar.broker.service.TopicPoliciesService;
 import org.apache.pulsar.broker.service.TransportCnx;
+import org.apache.pulsar.broker.service.trace.TopicTraceContext;
+import org.apache.pulsar.broker.service.trace.TopicTraceEventType;
+import org.apache.pulsar.broker.service.trace.TopicTraceOperation;
 import org.apache.pulsar.broker.service.schema.BookkeeperSchemaStorage;
 import org.apache.pulsar.broker.service.schema.exceptions.IncompatibleSchemaException;
 import org.apache.pulsar.broker.service.schema.exceptions.NotExistSchemaException;
@@ -1126,6 +1129,14 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                                                                    Boolean replicated,
                                                                    Map<String, String> subscriptionProperties) {
         CompletableFuture<Subscription> subscriptionFuture = new CompletableFuture<>();
+        boolean traceCreate = !subscriptions.containsKey(subscriptionName);
+        TopicTraceOperation traceOperation = traceCreate
+                ? newTopicTraceOperation(TopicTraceEventType.SUBSCRIPTION_CREATE).subscription(subscriptionName)
+                : null;
+        if (traceOperation != null) {
+            traceOperation.before("Subscription create started",
+                    Map.of("durable", true, "replicated", replicated != null && replicated));
+        }
         if (checkMaxSubscriptionsPerTopicExceed(subscriptionName)) {
             subscriptionFuture.completeExceptionally(new NotAllowedException(
                     "Exceed the maximum number of subscriptions of the topic: " + topic));
@@ -1146,6 +1157,10 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                     subscription = subscriptions.computeIfAbsent(subscriptionName,
                                   name -> createPersistentSubscription(subscriptionName, cursor,
                                           replicated, subscriptionProperties));
+                    if (traceOperation != null) {
+                        traceOperation.success("Subscription created",
+                                Map.of("durable", true, "replicated", replicated != null && replicated));
+                    }
                 } else {
                     // if subscription exists, check if it's a non-durable subscription
                     if (subscription.getCursor() != null && !subscription.getCursor().isDurable()) {
@@ -1171,6 +1186,10 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 log.warn("[{}] Failed to create subscription for {}: {}", topic, subscriptionName,
                         exception.getMessage());
                 decrementUsageCount();
+                if (traceOperation != null) {
+                    traceOperation.failure(exception, "Subscription create failed",
+                            Map.of("durable", true, "replicated", replicated != null && replicated));
+                }
                 subscriptionFuture.completeExceptionally(new PersistenceException(exception));
                 if (exception instanceof ManagedLedgerFencedException) {
                     // If the managed ledger has been fenced, we cannot continue using it. We need to close and reopen
@@ -1199,6 +1218,10 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
             PersistentSubscription subscription = subscriptions.get(subscriptionName);
 
             if (subscription == null) {
+                TopicTraceOperation traceOperation = newTopicTraceOperation(TopicTraceEventType.SUBSCRIPTION_CREATE)
+                        .subscription(subscriptionName);
+                traceOperation.before("Subscription create started",
+                        Map.of("durable", false, "readCompacted", isReadCompacted));
                 MessageIdImpl msgId = startMessageId != null ? (MessageIdImpl) startMessageId
                         : (MessageIdImpl) MessageId.latest;
 
@@ -1220,12 +1243,16 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                     cursor = ledger.newNonDurableCursor(startPosition, subscriptionName, initialPosition,
                             isReadCompacted);
                 } catch (ManagedLedgerException e) {
+                    traceOperation.failure(e, "Subscription create failed",
+                            Map.of("durable", false, "readCompacted", isReadCompacted));
                     return FutureUtil.failedFuture(e);
                 }
 
                 subscription = new PersistentSubscription(this, subscriptionName, cursor, false,
                         subscriptionProperties);
                 subscriptions.put(subscriptionName, subscription);
+                traceOperation.success("Subscription created",
+                        Map.of("durable", false, "readCompacted", isReadCompacted));
             } else {
                 // if subscription exists, check if it's a durable subscription
                 if (subscription.getCursor() != null && subscription.getCursor().isDurable()) {
@@ -2305,9 +2332,17 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 : CompletableFuture.completedFuture(null);
     }
 
+    private TopicTraceOperation newTopicTraceOperation(TopicTraceEventType eventType) {
+        return brokerService.getTopicTraceManager().newOperation(TopicName.get(topic), eventType,
+                TopicTraceContext.internal());
+    }
+
     CompletableFuture<Void> startReplicator(String remoteCluster) {
         log.info("[{}] Starting replicator to remote: {}", topic, remoteCluster);
         final CompletableFuture<Void> future = new CompletableFuture<>();
+        TopicTraceOperation traceOperation = newTopicTraceOperation(TopicTraceEventType.REPLICATOR_START)
+                .remoteCluster(remoteCluster);
+        traceOperation.before("Replicator start requested", null);
 
         String name = PersistentReplicator.getReplicatorName(replicatorPrefix, remoteCluster);
         String replicationStartAt = getBrokerService().getPulsar().getConfiguration().getReplicationStartAt();
@@ -2327,8 +2362,10 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 String localCluster = brokerService.pulsar().getConfiguration().getClusterName();
                 addReplicationCluster(remoteCluster, cursor, localCluster).whenComplete((__, ex) -> {
                     if (ex == null) {
+                        traceOperation.success("Replicator started", null);
                         future.complete(null);
                     } else {
+                        traceOperation.failure(ex, "Replicator start failed", null);
                         future.completeExceptionally(ex);
                     }
                 });
@@ -2336,6 +2373,7 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
 
             @Override
             public void openCursorFailed(ManagedLedgerException exception, Object ctx) {
+                traceOperation.failure(exception, "Replicator start failed", null);
                 future.completeExceptionally(new PersistenceException(exception));
             }
 
@@ -2386,6 +2424,9 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
     CompletableFuture<Void> removeReplicator(String remoteCluster) {
         log.info("[{}] Removing replicator to {}", topic, remoteCluster);
         final CompletableFuture<Void> future = new CompletableFuture<>();
+        TopicTraceOperation traceOperation = newTopicTraceOperation(TopicTraceEventType.REPLICATOR_STOP)
+                .remoteCluster(remoteCluster);
+        traceOperation.before("Replicator stop requested", null);
 
         String name = PersistentReplicator.getReplicatorName(replicatorPrefix, remoteCluster);
 
@@ -2395,18 +2436,21 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
                 @Override
                 public void deleteCursorComplete(Object ctx) {
                     replicators.remove(remoteCluster);
+                    traceOperation.success("Replicator stopped", null);
                     future.complete(null);
                 }
 
                 @Override
                 public void deleteCursorFailed(ManagedLedgerException exception, Object ctx) {
                     log.error("[{}] Failed to delete cursor {} {}", topic, name, exception.getMessage(), exception);
+                    traceOperation.failure(exception, "Replicator stop failed", null);
                     future.completeExceptionally(new PersistenceException(exception));
                 }
             }, null);
 
         }).exceptionally(e -> {
             log.error("[{}] Failed to close replication producer {} {}", topic, name, e.getMessage(), e);
+            traceOperation.failure(e, "Replicator stop failed", null);
             future.completeExceptionally(e);
             return null;
         });
@@ -4686,6 +4730,8 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
         if (policies == null) {
             return;
         }
+        newTopicTraceOperation(TopicTraceEventType.POLICIES_APPLY)
+                .success("Topic policies applied", policies);
         // Update props.
         // The component "EntryFilters" is update in the method "updateTopicPolicy(data)".
         //   see more detail: https://github.com/apache/pulsar/pull/19364.

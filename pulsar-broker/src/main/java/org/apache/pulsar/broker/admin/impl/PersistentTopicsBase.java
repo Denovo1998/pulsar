@@ -148,6 +148,9 @@ import org.apache.pulsar.common.stats.AnalyzeSubscriptionBacklogResult;
 import org.apache.pulsar.common.util.DateFormatter;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.common.util.collections.BitSetRecyclable;
+import org.apache.pulsar.broker.service.trace.TopicTraceContext;
+import org.apache.pulsar.broker.service.trace.TopicTraceEventType;
+import org.apache.pulsar.broker.service.trace.TopicTraceOperation;
 import org.apache.pulsar.compaction.Compactor;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
 import org.apache.pulsar.transaction.coordinator.TransactionCoordinatorID;
@@ -164,6 +167,11 @@ public class PersistentTopicsBase extends AdminResource {
     private static final int OFFLINE_TOPIC_STAT_TTL_MINS = 10;
     private static final String DEPRECATED_CLIENT_VERSION_PREFIX = "Pulsar-CPP-v";
     private static final Version LEAST_SUPPORTED_CLIENT_VERSION_PREFIX = Version.forIntegers(1, 21);
+
+    protected TopicTraceOperation newTopicTraceOperation(TopicName traceTopicName, TopicTraceEventType eventType) {
+        return pulsar().getBrokerService().getTopicTraceManager().newOperation(traceTopicName, eventType,
+                TopicTraceContext.fromHttp(httpRequest, clientAppId(), originalPrincipal()));
+    }
 
     protected CompletableFuture<List<String>> internalGetListAsync(Optional<String> bundle,
                                                                    @Nullable Map<String, String> properties) {
@@ -634,6 +642,8 @@ public class PersistentTopicsBase extends AdminResource {
             log.warn("[{}] [{}] properties is empty, ignore update", clientAppId(), topicName);
             return CompletableFuture.completedFuture(null);
         }
+        TopicTraceOperation traceOperation = newTopicTraceOperation(topicName, TopicTraceEventType.TOPIC_METADATA_UPDATE);
+        traceOperation.before("Topic metadata update started", properties);
         return validateTopicOperationAsync(topicName, TopicOperation.UPDATE_METADATA)
                 .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
                 .thenCompose(__ -> {
@@ -654,7 +664,17 @@ public class PersistentTopicsBase extends AdminResource {
                     }
                 }).thenAccept(__ ->
                     log.info("[{}] [{}] update properties success with properties {}", clientAppId(),
-                            topicName, properties));
+                            topicName, properties))
+                .whenComplete((__, ex) -> {
+                    if (ex == null) {
+                        traceOperation.success("Topic metadata updated",
+                                Map.of("operation", "updateProperties", "properties", properties));
+                    } else {
+                        traceOperation.failure(FutureUtil.unwrapCompletionException(ex),
+                                "Topic metadata update failed",
+                                Map.of("operation", "updateProperties", "properties", properties));
+                    }
+                });
     }
 
     private CompletableFuture<Void> internalUpdateNonPartitionedTopicProperties(Map<String, String> properties) {
@@ -693,6 +713,8 @@ public class PersistentTopicsBase extends AdminResource {
     }
 
     protected CompletableFuture<Void> internalRemovePropertiesAsync(boolean authoritative, String key) {
+        TopicTraceOperation traceOperation = newTopicTraceOperation(topicName, TopicTraceEventType.TOPIC_METADATA_UPDATE);
+        traceOperation.before("Topic metadata update started", Map.of("operation", "removeProperty", "key", key));
         return validateTopicOperationAsync(topicName, TopicOperation.DELETE_METADATA)
                 .thenCompose(__ -> validateTopicOwnershipAsync(topicName, authoritative))
                 .thenCompose(__ -> {
@@ -716,7 +738,17 @@ public class PersistentTopicsBase extends AdminResource {
                     }
                 }).thenAccept(__ ->
                         log.info("[{}] remove [{}] properties success with key {}",
-                                clientAppId(), topicName, key));
+                                clientAppId(), topicName, key))
+                .whenComplete((__, ex) -> {
+                    if (ex == null) {
+                        traceOperation.success("Topic metadata updated",
+                                Map.of("operation", "removeProperty", "key", key));
+                    } else {
+                        traceOperation.failure(FutureUtil.unwrapCompletionException(ex),
+                                "Topic metadata update failed",
+                                Map.of("operation", "removeProperty", "key", key));
+                    }
+                });
     }
 
     private CompletableFuture<Void> internalRemoveNonPartitionedTopicProperties(String key) {
@@ -2131,6 +2163,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     private CompletableFuture<Void> internalResetCursorForNonPartitionedTopic(String subName, long timestamp,
                                        boolean authoritative) {
+        TopicTraceOperation traceOperation = newTopicTraceOperation(topicName, TopicTraceEventType.SUBSCRIPTION_SEEK)
+                .subscription(subName);
+        traceOperation.before("Subscription seek started", Map.of("timestamp", timestamp));
         return validateTopicOwnershipAsync(topicName, authoritative)
             .thenCompose(__ -> validateTopicOperationAsync(topicName, TopicOperation.RESET_CURSOR, subName))
             .thenCompose(__ -> {
@@ -2146,9 +2181,16 @@ public class PersistentTopicsBase extends AdminResource {
                 }
                 return sub.resetCursor(timestamp);
             })
-            .thenRun(() ->
+            .thenRun(() -> {
+                traceOperation.success("Subscription seek completed", Map.of("timestamp", timestamp));
                 log.info("[{}][{}] Reset cursor on subscription {} to time {}",
-                    clientAppId(), topicName, subName, timestamp));
+                    clientAppId(), topicName, subName, timestamp);
+            }).whenComplete((__, ex) -> {
+                if (ex != null) {
+                    traceOperation.failure(FutureUtil.unwrapCompletionException(ex), "Subscription seek failed",
+                            Map.of("timestamp", timestamp));
+                }
+            });
     }
 
     protected void internalCreateSubscription(AsyncResponse asyncResponse, String subscriptionName,
@@ -2502,6 +2544,9 @@ public class PersistentTopicsBase extends AdminResource {
 
     protected void internalResetCursorOnPosition(AsyncResponse asyncResponse, String subName, boolean authoritative,
             MessageIdImpl messageId, boolean isExcluded, int batchIndex) {
+        TopicTraceOperation traceOperation = newTopicTraceOperation(topicName, TopicTraceEventType.SUBSCRIPTION_SEEK)
+                .subscription(subName);
+        traceOperation.before("Subscription seek started", Map.of("messageId", messageId.toString()));
         validateTopicOperationAsync(topicName, TopicOperation.RESET_CURSOR, subName)
         .thenCompose(__ -> {
             // If the topic name is a partition name, no need to get partition topic metadata again
@@ -2529,12 +2574,18 @@ public class PersistentTopicsBase extends AdminResource {
             if (topic == null) {
                 asyncResponse.resume(new RestException(Status.NOT_FOUND,
                         getTopicNotFoundErrorMessage(topicName.toString())));
+                traceOperation.failure(new RestException(Status.NOT_FOUND,
+                                getTopicNotFoundErrorMessage(topicName.toString())),
+                        "Subscription seek failed", Map.of("messageId", messageId.toString()));
                 return;
             }
             PersistentSubscription sub = ((PersistentTopic) topic).getSubscription(subName);
             if (sub == null) {
                 asyncResponse.resume(new RestException(Status.NOT_FOUND,
                         getSubNotFoundErrorMessage(topicName.toString(), subName)));
+                traceOperation.failure(new RestException(Status.NOT_FOUND,
+                                getSubNotFoundErrorMessage(topicName.toString(), subName)),
+                        "Subscription seek failed", Map.of("messageId", messageId.toString()));
                 return;
             }
             CompletableFuture<Integer> batchSizeFuture = new CompletableFuture<>();
@@ -2546,12 +2597,14 @@ public class PersistentTopicsBase extends AdminResource {
                     log.info("[{}][{}] successfully reset cursor on subscription {}"
                                     + " to position {}", clientAppId(),
                             topicName, subName, messageId);
+                    traceOperation.success("Subscription seek completed", Map.of("messageId", messageId.toString()));
                     asyncResponse.resume(Response.noContent().build());
                 }).exceptionally(ex -> {
                     Throwable t = (ex instanceof CompletionException ? ex.getCause() : ex);
                     log.warn("[{}][{}] Failed to reset cursor on subscription {}"
                                     + " to position {}", clientAppId(),
                             topicName, subName, messageId, t);
+                    traceOperation.failure(t, "Subscription seek failed", Map.of("messageId", messageId.toString()));
                     if (t instanceof SubscriptionInvalidCursorPosition) {
                         asyncResponse.resume(new RestException(Status.PRECONDITION_FAILED,
                                 "Unable to find position for position specified: "

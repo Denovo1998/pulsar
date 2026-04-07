@@ -101,6 +101,9 @@ import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.service.schema.SchemaRegistryService;
 import org.apache.pulsar.broker.service.schema.exceptions.IncompatibleSchemaException;
 import org.apache.pulsar.broker.service.schema.exceptions.InvalidSchemaDataException;
+import org.apache.pulsar.broker.service.trace.TopicTraceContext;
+import org.apache.pulsar.broker.service.trace.TopicTraceEventType;
+import org.apache.pulsar.broker.service.trace.TopicTraceOperation;
 import org.apache.pulsar.broker.topiclistlimit.TopicListMemoryLimiter;
 import org.apache.pulsar.broker.topiclistlimit.TopicListSizeResultCache;
 import org.apache.pulsar.broker.web.RestException;
@@ -640,7 +643,8 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
                     lookupTopicAsync(getBrokerService().pulsar(), topicName, authoritative,
                             authRole, originalPrincipal, authenticationData,
                             originalAuthData != null ? originalAuthData : authenticationData,
-                            requestId, advertisedListenerName, properties).handle((lookupResponse, ex) -> {
+                            requestId, advertisedListenerName, properties,
+                            TopicTraceContext.fromServerCnx(this, requestId)).handle((lookupResponse, ex) -> {
                                 if (ex == null) {
                                     writeAndFlush(lookupResponse);
                                 } else {
@@ -678,6 +682,12 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
 
     private void writeAndFlush(ByteBuf cmd) {
         NettyChannelUtil.writeAndFlushWithVoidPromise(ctx, cmd);
+    }
+
+    private TopicTraceOperation newTopicTraceOperation(TopicName topicName, TopicTraceEventType eventType,
+                                                       long requestId) {
+        return service.getTopicTraceManager().newOperation(topicName, eventType,
+                TopicTraceContext.fromServerCnx(this, requestId));
     }
 
     @Override
@@ -1503,6 +1513,13 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
                                 log.info("[{}] Created subscription on topic {} / {}",
                                         remoteAddress, topicName, subscriptionName);
                                 commandSender.sendSuccessResponse(requestId);
+                                newTopicTraceOperation(topicName, TopicTraceEventType.CONSUMER_CONNECT, requestId)
+                                        .subscription(subscriptionName)
+                                        .consumer(consumer.consumerName(), consumer.consumerId())
+                                        .success("Consumer connected",
+                                                Map.of("subscriptionType", subType.name(),
+                                                        "durable", isDurable,
+                                                        "readCompacted", readCompacted));
                                 if (brokerInterceptor != null) {
                                     try {
                                         brokerInterceptor.consumerCreated(this, consumer, metadata);
@@ -1527,6 +1544,14 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
 
                         }, ctx.executor())
                         .exceptionallyAsync(exception -> {
+                            Throwable cause = FutureUtil.unwrapCompletionException(exception);
+                            newTopicTraceOperation(topicName, TopicTraceEventType.CONSUMER_CONNECT, requestId)
+                                    .subscription(subscriptionName)
+                                    .consumer(consumerName, consumerId)
+                                    .failure(cause, "Consumer connect failed",
+                                            Map.of("subscriptionType", subType.name(),
+                                                    "durable", isDurable,
+                                                    "readCompacted", readCompacted));
                             if (exception.getCause() instanceof ConsumerBusyException) {
                                 if (log.isDebugEnabled()) {
                                     log.debug(
@@ -1895,6 +1920,12 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
                     commandSender.sendProducerSuccessResponse(requestId, producerName,
                             producer.getLastSequenceId(), producer.getSchemaVersion(),
                             newTopicEpoch, true /* producer is ready now */);
+                    newTopicTraceOperation(topicName, TopicTraceEventType.PRODUCER_CONNECT, requestId)
+                            .producer(producerName, producerId)
+                            .success("Producer connected",
+                                    Map.of("producerAccessMode", producerAccessMode.name(),
+                                            "supportsPartialProducer", supportsPartialProducer,
+                                            "userProvidedProducerName", userProvidedProducerName));
                     if (brokerInterceptor != null) {
                         try {
                             brokerInterceptor.producerCreated(this, producer, metadata);
@@ -1922,6 +1953,13 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
 
             producers.remove(producerId, producerFuture);
         }, ctx.executor()).exceptionallyAsync(ex -> {
+            Throwable cause = FutureUtil.unwrapCompletionException(ex);
+            newTopicTraceOperation(topicName, TopicTraceEventType.PRODUCER_CONNECT, requestId)
+                    .producer(producerName, producerId)
+                    .failure(cause, "Producer connect failed",
+                            Map.of("producerAccessMode", producerAccessMode.name(),
+                                    "supportsPartialProducer", supportsPartialProducer,
+                                    "userProvidedProducerName", userProvidedProducerName));
             if (ex.getCause() instanceof BrokerServiceException.TopicMigratedException) {
                 Optional<ClusterUrl> clusterURL = getMigratedClusterUrl(service.getPulsar(), topic.getName());
                 if (clusterURL.isPresent()) {
@@ -2313,6 +2351,10 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
                      remoteAddress, producerId);
             commandSender.sendSuccessResponse(requestId);
             producers.remove(producerId, producerFuture);
+            newTopicTraceOperation(TopicName.get(producer.getTopic().getName()),
+                    TopicTraceEventType.PRODUCER_DISCONNECT, requestId)
+                    .producer(producer.getProducerName(), producer.getProducerId())
+                    .success("Producer disconnected", producer.getMetadata());
             if (brokerInterceptor != null) {
                 brokerInterceptor.producerClosed(this, producer, producer.getMetadata());
             }
@@ -2359,6 +2401,11 @@ public class ServerCnx extends PulsarHandler implements TransportCnx {
             consumers.remove(consumerId, consumerFuture);
             commandSender.sendSuccessResponse(requestId);
             log.info("[{}] Closed consumer, consumerId={}", remoteAddress, consumerId);
+            newTopicTraceOperation(TopicName.get(consumer.getSubscription().getTopicName()),
+                    TopicTraceEventType.CONSUMER_DISCONNECT, requestId)
+                    .subscription(consumer.getSubscription().getName())
+                    .consumer(consumer.consumerName(), consumer.consumerId())
+                    .success("Consumer disconnected", consumer.getMetadata());
             if (brokerInterceptor != null) {
                 brokerInterceptor.consumerClosed(this, consumer, consumer.getMetadata());
             }

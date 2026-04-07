@@ -134,6 +134,7 @@ import org.apache.pulsar.broker.service.persistent.DispatchRateLimiterFactory;
 import org.apache.pulsar.broker.service.persistent.DispatchRateLimiterFactoryClassic;
 import org.apache.pulsar.broker.service.persistent.PersistentTopic;
 import org.apache.pulsar.broker.service.persistent.SystemTopic;
+import org.apache.pulsar.broker.service.trace.TopicTraceManager;
 import org.apache.pulsar.broker.service.plugin.EntryFilterProvider;
 import org.apache.pulsar.broker.stats.ClusterReplicationMetrics;
 import org.apache.pulsar.broker.stats.prometheus.metrics.ObserverGauge;
@@ -336,6 +337,7 @@ public class BrokerService implements Closeable {
     private Set<ManagedLedgerPayloadProcessor> brokerEntryPayloadProcessors;
 
     private final TopicEventsDispatcher topicEventsDispatcher = new TopicEventsDispatcher();
+    private final TopicTraceManager topicTraceManager;
     private volatile boolean unloaded = false;
 
     // semaphore for limiting the concurrency of ledger deletion at broker level,
@@ -479,6 +481,7 @@ public class BrokerService implements Closeable {
 
         this.brokerEntryPayloadProcessors = BrokerEntryMetadataUtils.loadInterceptors(pulsar.getConfiguration()
                         .getBrokerEntryPayloadProcessors(), BrokerService.class.getClassLoader());
+        this.topicTraceManager = new TopicTraceManager(pulsar);
 
         this.bundlesQuotas = new BundlesQuotas(pulsar);
         if (pulsar.getConfiguration().getManagedLedgerDeleteMaxConcurrentRequests() > 0) {
@@ -523,6 +526,10 @@ public class BrokerService implements Closeable {
         topicEventsDispatcher.addTopicEventListener(listeners);
         topics.keySet().forEach(topic ->
                 TopicEventsDispatcher.notify(listeners, topic, TopicEvent.LOAD, EventStage.SUCCESS, null));
+    }
+
+    public TopicTraceManager getTopicTraceManager() {
+        return topicTraceManager;
     }
 
     public void removeTopicEventListener(TopicEventsListener... listeners) {
@@ -608,6 +615,7 @@ public class BrokerService implements Closeable {
     public void start() throws Exception {
         this.producerNameGenerator = new DistributedIdGenerator(pulsar.getCoordinationService(),
                 PRODUCER_NAME_GENERATOR_PATH, pulsar.getConfiguration().getClusterName());
+        addTopicEventListener(topicTraceManager);
 
         ServiceConfiguration serviceConfig = pulsar.getConfiguration();
         List<BindAddress> bindAddresses = BindAddressValidator.validateBindAddresses(serviceConfig,
@@ -910,6 +918,7 @@ public class BrokerService implements Closeable {
                                 });
 
                                 maxTopicListInFlightLimiter.close();
+                                topicTraceManager.close();
 
                                 if (interceptor != null) {
                                     interceptor.close();
@@ -1851,20 +1860,17 @@ public class BrokerService implements Closeable {
                             n.recycle();
                             return found;
                         }), (managedLedgerConfig, exists) -> {
-            if (isBrokerEntryMetadataEnabled() || isBrokerPayloadProcessorEnabled()) {
-                // init managedLedger interceptor
-                Set<BrokerEntryMetadataInterceptor> interceptors = new HashSet<>();
-                for (BrokerEntryMetadataInterceptor interceptor : brokerEntryMetadataInterceptors) {
-                    // add individual AppendOffsetMetadataInterceptor for each topic
-                    if (interceptor instanceof AppendIndexMetadataInterceptor) {
-                        interceptors.add(new AppendIndexMetadataInterceptor());
-                    } else {
-                        interceptors.add(interceptor);
-                    }
+            Set<BrokerEntryMetadataInterceptor> interceptors = new HashSet<>();
+            for (BrokerEntryMetadataInterceptor interceptor : brokerEntryMetadataInterceptors) {
+                // add individual AppendOffsetMetadataInterceptor for each topic
+                if (interceptor instanceof AppendIndexMetadataInterceptor) {
+                    interceptors.add(new AppendIndexMetadataInterceptor());
+                } else {
+                    interceptors.add(interceptor);
                 }
-                managedLedgerConfig.setManagedLedgerInterceptor(
-                        new ManagedLedgerInterceptorImpl(interceptors, brokerEntryPayloadProcessors));
             }
+            managedLedgerConfig.setManagedLedgerInterceptor(
+                    new ManagedLedgerInterceptorImpl(interceptors, brokerEntryPayloadProcessors, topicTraceManager));
             managedLedgerConfig.setCreateIfMissing(createIfMissing);
             if (context.getProperties() != null) {
                 managedLedgerConfig.setProperties(context.getProperties());

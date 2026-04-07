@@ -26,9 +26,13 @@ import java.util.concurrent.CompletableFuture;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.intercept.ManagedLedgerInterceptor;
 import org.apache.commons.lang3.tuple.ImmutablePair;
+import org.apache.pulsar.broker.service.trace.TopicTraceContext;
+import org.apache.pulsar.broker.service.trace.TopicTraceEventType;
+import org.apache.pulsar.broker.service.trace.TopicTraceManager;
 import org.apache.pulsar.common.intercept.AppendIndexMetadataInterceptor;
 import org.apache.pulsar.common.intercept.BrokerEntryMetadataInterceptor;
 import org.apache.pulsar.common.intercept.ManagedLedgerPayloadProcessor;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.protocol.Commands;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,10 +45,18 @@ public class ManagedLedgerInterceptorImpl implements ManagedLedgerInterceptor {
     private final AppendIndexMetadataInterceptor appendIndexMetadataInterceptor;
     private final Set<ManagedLedgerPayloadProcessor.Processor> inputProcessors;
     private final Set<ManagedLedgerPayloadProcessor.Processor> outputProcessors;
+    private final TopicTraceManager topicTraceManager;
 
     public ManagedLedgerInterceptorImpl(Set<BrokerEntryMetadataInterceptor> brokerEntryMetadataInterceptors,
                                         Set<ManagedLedgerPayloadProcessor> brokerEntryPayloadProcessors) {
+        this(brokerEntryMetadataInterceptors, brokerEntryPayloadProcessors, null);
+    }
+
+    public ManagedLedgerInterceptorImpl(Set<BrokerEntryMetadataInterceptor> brokerEntryMetadataInterceptors,
+                                        Set<ManagedLedgerPayloadProcessor> brokerEntryPayloadProcessors,
+                                        TopicTraceManager topicTraceManager) {
         this.brokerEntryMetadataInterceptors = brokerEntryMetadataInterceptors;
+        this.topicTraceManager = topicTraceManager;
 
         // save appendIndexMetadataInterceptor to field
         AppendIndexMetadataInterceptor appendIndexMetadataInterceptor = null;
@@ -176,5 +188,39 @@ public class ManagedLedgerInterceptorImpl implements ManagedLedgerInterceptor {
             return null;
         }
         return processPayload(this.outputProcessors, null, ledgerData);
+    }
+
+    @Override
+    public void onLedgerRolled(String name, long closedLedgerId) {
+        TopicName topicName = managedLedgerTopicName(name);
+        if (topicName == null || topicTraceManager == null) {
+            return;
+        }
+        topicTraceManager.newOperation(topicName, TopicTraceEventType.LEDGER_ROLL, TopicTraceContext.system())
+                .ledger(closedLedgerId)
+                .success("Ledger rolled", Map.of("closedLedgerId", closedLedgerId));
+    }
+
+    @Override
+    public void onLedgersPurged(String name, int deletedLedgerCount, long firstLedgerId, long lastLedgerId) {
+        TopicName topicName = managedLedgerTopicName(name);
+        if (topicName == null || topicTraceManager == null || deletedLedgerCount <= 0) {
+            return;
+        }
+        topicTraceManager.newOperation(topicName, TopicTraceEventType.LEDGER_PURGE, TopicTraceContext.system())
+                .ledger(lastLedgerId)
+                .success("Ledgers purged",
+                        Map.of("deletedLedgerCount", deletedLedgerCount,
+                                "firstLedgerId", firstLedgerId,
+                                "lastLedgerId", lastLedgerId));
+    }
+
+    private TopicName managedLedgerTopicName(String managedLedgerName) {
+        try {
+            return TopicName.get(TopicName.fromPersistenceNamingEncoding(managedLedgerName));
+        } catch (Exception e) {
+            log.debug("Ignore managed-ledger trace event for {}", managedLedgerName, e);
+            return null;
+        }
     }
 }

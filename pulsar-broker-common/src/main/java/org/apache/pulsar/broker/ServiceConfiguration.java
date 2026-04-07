@@ -1680,6 +1680,18 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
             category = CATEGORY_SERVER,
+            doc = "Enable or disable topic trace audit events. Namespace and topic properties can override it."
+    )
+    private boolean topicTraceEnabled = false;
+
+    @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "Allowed topic trace event types. Empty means all event types when topicTraceEnabled is true."
+    )
+    private Set<String> topicTraceEventTypes = new LinkedHashSet<>();
+
+    @FieldContext(
+            category = CATEGORY_SERVER,
             doc = "# Enable strict topic name check. Which includes two parts as follows:\n"
                     + "# 1. Mark `-partition-` as a keyword.\n"
                     + "# E.g.\n"

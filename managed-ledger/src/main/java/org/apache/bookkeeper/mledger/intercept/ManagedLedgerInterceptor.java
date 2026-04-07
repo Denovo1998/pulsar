@@ -101,6 +101,26 @@ public interface ManagedLedgerInterceptor {
     void onUpdateManagedLedgerInfo(Map<String, String> propertiesMap);
 
     /**
+     * Intercept after a ledger rollover has completed.
+     *
+     * @param name managed ledger name
+     * @param closedLedgerId ledger id that was rolled over
+     */
+    default void onLedgerRolled(String name, long closedLedgerId) {
+    }
+
+    /**
+     * Intercept after consumed ledgers have been trimmed successfully.
+     *
+     * @param name managed ledger name
+     * @param deletedLedgerCount number of deleted ledgers
+     * @param firstLedgerId first deleted ledger id
+     * @param lastLedgerId last deleted ledger id
+     */
+    default void onLedgersPurged(String name, int deletedLedgerCount, long firstLedgerId, long lastLedgerId) {
+    }
+
+    /**
      * A reference handle to the payload processor.
      */
     interface PayloadProcessorHandle {

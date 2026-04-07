@@ -24,6 +24,7 @@ import io.netty.buffer.ByteBuf;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -36,6 +37,9 @@ import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
 import org.apache.pulsar.broker.namespace.LookupOptions;
+import org.apache.pulsar.broker.service.trace.TopicTraceContext;
+import org.apache.pulsar.broker.service.trace.TopicTraceEventType;
+import org.apache.pulsar.broker.service.trace.TopicTraceOperation;
 import org.apache.pulsar.broker.web.PulsarWebResource;
 import org.apache.pulsar.broker.web.RestException;
 import org.apache.pulsar.common.api.proto.CommandLookupTopicResponse.LookupType;
@@ -59,8 +63,13 @@ public class TopicLookupBase extends PulsarWebResource {
 
     protected CompletableFuture<LookupData> internalLookupTopicAsync(final TopicName topicName, boolean authoritative,
                                                                      String listenerName) {
+        TopicTraceOperation traceOperation = pulsar().getBrokerService().getTopicTraceManager().newOperation(topicName,
+                TopicTraceEventType.LOOKUP,
+                TopicTraceContext.fromHttp(httpRequest, clientAppId(), originalPrincipal()));
         if (!pulsar().getBrokerService().getLookupRequestSemaphore().tryAcquire()) {
             log.warn("No broker was found available for topic {}", topicName);
+            traceOperation.failure(new WebApplicationException(Response.Status.SERVICE_UNAVAILABLE),
+                    "Lookup failed", lookupTraceDetails(authoritative, listenerName, null, null, null));
             return FutureUtil.failedFuture(new WebApplicationException(Response.Status.SERVICE_UNAVAILABLE));
         }
         return validateGlobalNamespaceOwnershipAsync(topicName.getNamespaceObject())
@@ -128,6 +137,8 @@ public class TopicLookupBase extends PulsarWebResource {
                             if (log.isDebugEnabled()) {
                                 log.debug("Redirect lookup for topic {} to {}", topicName, redirect);
                             }
+                            traceOperation.success("Lookup redirected", lookupTraceDetails(newAuthoritative,
+                                    listenerName, LookupType.Redirect.name(), redirect.toString(), null));
                             throw new WebApplicationException(Response.temporaryRedirect(redirect).build());
                         } else {
                             // Found broker owning the topic
@@ -135,12 +146,17 @@ public class TopicLookupBase extends PulsarWebResource {
                                 log.debug("Lookup succeeded for topic {} -- broker: {}", topicName,
                                         result.getLookupData());
                             }
+                            traceOperation.success("Lookup completed", lookupTraceDetails(true, listenerName,
+                                    LookupType.Connect.name(), result.getLookupData().getHttpUrl(),
+                                    result.getLookupData().getHttpUrlTls()));
                             pulsar().getBrokerService().getLookupRequestSemaphore().release();
                             return result.getLookupData();
                         }
                     });
                 }).exceptionally(ex -> {
                     pulsar().getBrokerService().getLookupRequestSemaphore().release();
+                    traceOperation.failure(FutureUtil.unwrapCompletionException(ex), "Lookup failed",
+                            lookupTraceDetails(authoritative, listenerName, null, null, null));
                     throw FutureUtil.wrapToCompletionException(ex);
                 });
     }
@@ -184,10 +200,13 @@ public class TopicLookupBase extends PulsarWebResource {
                                                               AuthenticationDataSource authenticationData,
                                                               AuthenticationDataSource originalAuthenticationData,
                                                               long requestId, final String advertisedListenerName,
-                                                              Map<String, String> properties) {
+                                                              Map<String, String> properties,
+                                                              TopicTraceContext traceContext) {
 
         final CompletableFuture<ByteBuf> validationFuture = new CompletableFuture<>();
         final CompletableFuture<ByteBuf> lookupfuture = new CompletableFuture<>();
+        final TopicTraceOperation traceOperation = pulsarService.getBrokerService().getTopicTraceManager()
+                .newOperation(topicName, TopicTraceEventType.LOOKUP, traceContext);
 
         // (1) authorize client
         checkAuthorizationAsync(pulsarService, topicName, clientAppId, originalPrinciple,
@@ -267,6 +286,9 @@ public class TopicLookupBase extends PulsarWebResource {
                             }
 
                             if (!lookupResult.isPresent()) {
+                                traceOperation.failure(new IllegalStateException("No broker was available to own topic"),
+                                        "Lookup failed", lookupTraceDetails(authoritative, advertisedListenerName,
+                                                null, null, null));
                                 lookupfuture.complete(newLookupErrorResponse(ServerError.ServiceNotReady,
                                         "No broker was available to own " + topicName, requestId));
                                 return;
@@ -276,22 +298,30 @@ public class TopicLookupBase extends PulsarWebResource {
                             printWarnLogIfLookupResUnexpected(topicName, lookupData, options, pulsarService);
                             if (lookupResult.get().isRedirect()) {
                                 boolean newAuthoritative = lookupResult.get().isAuthoritativeRedirect();
+                                traceOperation.success("Lookup redirected", lookupTraceDetails(newAuthoritative,
+                                        advertisedListenerName, LookupType.Redirect.name(),
+                                        lookupData.getBrokerUrl(), lookupData.getBrokerUrlTls()));
                                 lookupfuture.complete(
                                         newLookupResponse(lookupData.getBrokerUrl(), lookupData.getBrokerUrlTls(),
                                                 newAuthoritative, LookupType.Redirect, requestId, false));
                             } else {
                                 ServiceConfiguration conf = pulsarService.getConfiguration();
+                                traceOperation.success("Lookup completed", lookupTraceDetails(true,
+                                        advertisedListenerName, LookupType.Connect.name(),
+                                        lookupData.getBrokerUrl(), lookupData.getBrokerUrlTls()));
                                 lookupfuture.complete(newLookupResponse(lookupData.getBrokerUrl(),
                                         lookupData.getBrokerUrlTls(), true /* authoritative */, LookupType.Connect,
                                         requestId, shouldRedirectThroughServiceUrl(conf, lookupData)));
                             }
                         }).exceptionally(ex -> {
-                            handleLookupError(lookupfuture, topicName.toString(), clientAppId, requestId, ex);
+                            handleLookupError(lookupfuture, traceOperation, topicName.toString(), clientAppId,
+                                    requestId, authoritative, advertisedListenerName, ex);
                             return null;
                         });
             }
         }).exceptionally(ex -> {
-            handleLookupError(lookupfuture, topicName.toString(), clientAppId, requestId, ex);
+            handleLookupError(lookupfuture, traceOperation, topicName.toString(), clientAppId, requestId,
+                    authoritative, advertisedListenerName, ex);
             return null;
         });
 
@@ -320,10 +350,13 @@ public class TopicLookupBase extends PulsarWebResource {
         }
     }
 
-    private static void handleLookupError(CompletableFuture<ByteBuf> lookupFuture, String topicName, String clientAppId,
-                                   long requestId, Throwable ex){
+    private static void handleLookupError(CompletableFuture<ByteBuf> lookupFuture, TopicTraceOperation traceOperation,
+                                          String topicName, String clientAppId, long requestId,
+                                          boolean authoritative, String listenerName, Throwable ex) {
         Throwable unwrapEx = FutureUtil.unwrapCompletionException(ex);
         final String errorMsg = unwrapEx.getMessage();
+        traceOperation.failure(unwrapEx, "Lookup failed",
+                lookupTraceDetails(authoritative, listenerName, null, null, null));
         if (unwrapEx instanceof PulsarServerException) {
             unwrapEx = FutureUtil.unwrapCompletionException(unwrapEx.getCause());
         }
@@ -340,6 +373,25 @@ public class TopicLookupBase extends PulsarWebResource {
             log.warn("Failed to lookup {} for topic {} with error {}", clientAppId, topicName, errorMsg);
             lookupFuture.complete(newLookupErrorResponse(ServerError.ServiceNotReady, errorMsg, requestId));
         }
+    }
+
+    private static Map<String, Object> lookupTraceDetails(boolean authoritative, String listenerName, String lookupType,
+                                                          String brokerUrl, String brokerUrlTls) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("authoritative", authoritative);
+        if (StringUtils.isNotBlank(listenerName)) {
+            details.put("listenerName", listenerName);
+        }
+        if (StringUtils.isNotBlank(lookupType)) {
+            details.put("lookupType", lookupType);
+        }
+        if (StringUtils.isNotBlank(brokerUrl)) {
+            details.put("brokerUrl", brokerUrl);
+        }
+        if (StringUtils.isNotBlank(brokerUrlTls)) {
+            details.put("brokerUrlTls", brokerUrlTls);
+        }
+        return details;
     }
 
     protected TopicName getTopicName(String topicDomain, String tenant, String namespace,

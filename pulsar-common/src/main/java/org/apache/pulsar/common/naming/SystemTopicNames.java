@@ -33,6 +33,11 @@ public class SystemTopicNames {
     public static final String NAMESPACE_EVENTS_LOCAL_NAME = "__change_events";
 
     /**
+     * Local topic name for topic trace events.
+     */
+    public static final String TOPIC_TRACE_EVENTS_LOCAL_NAME = "__topic_trace_events";
+
+    /**
      * Local topic name for the transaction buffer snapshot.
      */
     public static final String TRANSACTION_BUFFER_SNAPSHOT = "__transaction_buffer_snapshot";
@@ -60,8 +65,9 @@ public class SystemTopicNames {
      * The set of all local topic names declared above.
      */
     public static final Set<String> EVENTS_TOPIC_NAMES =
-            Collections.unmodifiableSet(Sets.newHashSet(NAMESPACE_EVENTS_LOCAL_NAME, TRANSACTION_BUFFER_SNAPSHOT,
-                    TRANSACTION_BUFFER_SNAPSHOT_INDEXES, TRANSACTION_BUFFER_SNAPSHOT_SEGMENTS));
+            Collections.unmodifiableSet(Sets.newHashSet(NAMESPACE_EVENTS_LOCAL_NAME, TOPIC_TRACE_EVENTS_LOCAL_NAME,
+                    TRANSACTION_BUFFER_SNAPSHOT, TRANSACTION_BUFFER_SNAPSHOT_INDEXES,
+                    TRANSACTION_BUFFER_SNAPSHOT_SEGMENTS));
 
 
     public static final TopicName TRANSACTION_COORDINATOR_ASSIGN = TopicName.get(TopicDomain.persistent.value(),
@@ -87,6 +93,13 @@ public class SystemTopicNames {
             return false;
         }
         return TopicName.getPartitionedTopicName(topic).getLocalName().equals(NAMESPACE_EVENTS_LOCAL_NAME);
+    }
+
+    public static boolean isTopicTraceSystemTopic(String topic) {
+        if (topic == null) {
+            return false;
+        }
+        return TopicName.getPartitionedTopicName(topic).getLocalName().equals(TOPIC_TRACE_EVENTS_LOCAL_NAME);
     }
 
     /**
