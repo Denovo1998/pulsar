@@ -32,6 +32,7 @@ import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.client.api.ClientBuilder;
 import org.apache.pulsar.client.api.Consumer;
 import org.apache.pulsar.client.api.Message;
+import org.apache.pulsar.client.api.MessageRoutingMode;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.SubscriptionType;
 import org.apache.pulsar.client.impl.ProducerBuilderImpl;
@@ -179,6 +180,77 @@ public class PerformanceProducerTest extends MockedPulsarServiceBaseTest {
         ProducerBuilderImpl<byte[]> builder = (ProducerBuilderImpl<byte[]>) producer.createProducerBuilder(client,
                 producerId);
         Assert.assertFalse(builder.getConf().isBatchingEnabled());
+    }
+
+    @Test(timeOut = 20000)
+    public void testFixedMessageKey() throws Exception {
+        String argString = "%s -r 10 -u %s -m 5 --message-key hot-key";
+        String topic = testTopic + UUID.randomUUID();
+        String args = String.format(argString, topic, pulsar.getBrokerServiceUrl());
+        Thread thread = new Thread(() -> {
+            try {
+                PerformanceProducer producer = new PerformanceProducer();
+                producer.run(args.split(" "));
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+        Consumer<byte[]> consumer = pulsarClient.newConsumer().topic(topic).subscriptionName("sub")
+                .subscriptionType(SubscriptionType.Shared).subscribe();
+
+        thread.start();
+
+        Message<byte[]> message = consumer.receive(15, TimeUnit.SECONDS);
+        assertNotNull(message);
+        Assert.assertEquals(message.getKey(), "hot-key");
+        consumer.acknowledge(message);
+
+        thread.interrupt();
+        thread.join();
+        consumer.close();
+    }
+
+    @Test
+    public void testMessageKeyCannotBeUsedWithMessageKeyGenerationMode() {
+        PerformanceProducer producer = new PerformanceProducer();
+        producer.topics = List.of(testTopic + UUID.randomUUID());
+        producer.messageKey = "hot-key";
+        producer.messageKeyGenerationMode = "random";
+
+        Assert.expectThrows(Exception.class, producer::validate);
+    }
+
+    @Test
+    public void testCustomMessageRoutingModeIsRejected() {
+        PerformanceProducer producer = new PerformanceProducer();
+        producer.topics = List.of(testTopic + UUID.randomUUID());
+        producer.messageRoutingMode = MessageRoutingMode.CustomPartition;
+
+        Assert.expectThrows(Exception.class, producer::validate);
+    }
+
+    @Test(timeOut = 20000)
+    public void testProducerFaultScenarioBuilderOptions() throws Exception {
+        String topic = testTopic + UUID.randomUUID();
+        PerformanceProducer producer = new PerformanceProducer();
+        producer.topics = List.of(topic);
+        producer.serviceURL = pulsar.getBrokerServiceUrl();
+
+        ClientBuilder clientBuilder = PerfClientUtils.createClientBuilderFromArguments(producer)
+                .enableTransaction(producer.isEnableTransaction);
+        @Cleanup
+        PulsarClient client = clientBuilder.build();
+        ProducerBuilderImpl<byte[]> defaultBuilder = (ProducerBuilderImpl<byte[]>) producer.createProducerBuilder(
+                client, 0);
+        Assert.assertEquals(defaultBuilder.getConf().getMessageRoutingMode(), MessageRoutingMode.RoundRobinPartition);
+        Assert.assertTrue(defaultBuilder.getConf().isBlockIfQueueFull());
+
+        producer.messageRoutingMode = MessageRoutingMode.SinglePartition;
+        producer.blockIfQueueFull = false;
+        ProducerBuilderImpl<byte[]> faultBuilder = (ProducerBuilderImpl<byte[]>) producer.createProducerBuilder(
+                client, 0);
+        Assert.assertEquals(faultBuilder.getConf().getMessageRoutingMode(), MessageRoutingMode.SinglePartition);
+        Assert.assertFalse(faultBuilder.getConf().isBlockIfQueueFull());
     }
 
     @Test(timeOut = 20000)
