@@ -214,6 +214,15 @@ public class PerformanceProducer extends PerformanceTopicListArguments{
             + ", valid options are: [autoIncrement, random]", descriptionKey = "messageKeyGenerationMode")
     public String messageKeyGenerationMode = null;
 
+    @Option(names = {"--message-key"}, description = "Use a fixed key for all messages")
+    public String messageKey = null;
+
+    @Option(names = {"--message-routing-mode"}, description = "Message routing mode for partitioned topics")
+    public MessageRoutingMode messageRoutingMode = MessageRoutingMode.RoundRobinPartition;
+
+    @Option(names = {"--block-if-queue-full"}, arity = "1", description = "Block sends when the pending queue is full")
+    public boolean blockIfQueueFull = true;
+
     @Option(names = { "-am", "--access-mode" }, description = "Producer access mode")
     public ProducerAccessMode producerAccessMode = ProducerAccessMode.Shared;
 
@@ -436,6 +445,17 @@ public class PerformanceProducer extends PerformanceTopicListArguments{
         super("produce");
     }
 
+    @Override
+    public void validate() throws Exception {
+        super.validate();
+        if (isNotBlank(this.messageKey) && isNotBlank(this.messageKeyGenerationMode)) {
+            throw new Exception("--message-key cannot be used with --message-key-generation-mode");
+        }
+        if (this.messageRoutingMode == MessageRoutingMode.CustomPartition) {
+            throw new Exception("--message-routing-mode CustomPartition is not supported by pulsar-perf");
+        }
+    }
+
     private static void executorShutdownNow(ExecutorService executor) {
         executor.shutdownNow();
         try {
@@ -470,8 +490,7 @@ public class PerformanceProducer extends PerformanceTopicListArguments{
                 .compressionType(this.compression) //
                 .maxPendingMessages(this.maxOutstanding) //
                 .accessMode(this.producerAccessMode)
-                // enable round robin message routing if it is a partitioned topic
-                .messageRoutingMode(MessageRoutingMode.RoundRobinPartition);
+                .messageRoutingMode(this.messageRoutingMode);
         if (this.maxPendingMessagesAcrossPartitions > 0) {
             producerBuilder.maxPendingMessagesAcrossPartitions(this.maxPendingMessagesAcrossPartitions);
         }
@@ -494,8 +513,7 @@ public class PerformanceProducer extends PerformanceTopicListArguments{
             producerBuilder.batchingMaxBytes(this.batchMaxBytes);
         }
 
-        // Block if queue is full else we will start seeing errors in sendAsync
-        producerBuilder.blockIfQueueFull(true);
+        producerBuilder.blockIfQueueFull(this.blockIfQueueFull);
 
         if (isNotBlank(this.encKeyName) && isNotBlank(this.encKeyFile)) {
             producerBuilder.addEncryptionKey(this.encKeyName);
@@ -648,8 +666,10 @@ public class PerformanceProducer extends PerformanceTopicListArguments{
                     if (this.setEventTime) {
                         messageBuilder.eventTime(System.currentTimeMillis());
                     }
-                    //generate msg key
-                    if (msgKeyMode == MessageKeyGenerationMode.random) {
+                    // Generate message key.
+                    if (isNotBlank(this.messageKey)) {
+                        messageBuilder.key(this.messageKey);
+                    } else if (msgKeyMode == MessageKeyGenerationMode.random) {
                         messageBuilder.key(String.valueOf(ThreadLocalRandom.current().nextInt()));
                     } else if (msgKeyMode == MessageKeyGenerationMode.autoIncrement) {
                         messageBuilder.key(String.valueOf(totalSent.get()));

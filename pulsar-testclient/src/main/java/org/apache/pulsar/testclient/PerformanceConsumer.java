@@ -180,6 +180,15 @@ public class PerformanceConsumer extends PerformanceTopicListArguments{
     @Option(names = { "--histogram-file" }, description = "HdrHistogram output file")
     public String histogramFile = null;
 
+    @Option(names = {"--ack-mode"}, description = "Acknowledgement mode, valid options are: [ack, none]")
+    public AckMode ackMode = AckMode.ack;
+
+    @Option(names = {"--processing-delay-millis"}, description = "Delay before acknowledging each message")
+    public long processingDelayMillis = 0;
+
+    @Option(names = {"--ack-timeout-millis"}, description = "Ack timeout in millis. 0 disables ack timeout")
+    public long ackTimeoutMillis = 0;
+
     public PerformanceConsumer() {
         super("consume");
     }
@@ -206,6 +215,15 @@ public class PerformanceConsumer extends PerformanceTopicListArguments{
             } else {
                 throw new Exception("The size of subscriptions list should be equal to --num-subscriptions");
             }
+        }
+        if (this.ackMode == AckMode.none && this.isEnableTransaction) {
+            throw new Exception("--ack-mode none cannot be used with --txn-enable");
+        }
+        if (this.processingDelayMillis < 0) {
+            throw new Exception("--processing-delay-millis must be >= 0");
+        }
+        if (this.ackTimeoutMillis > 0 && this.ackTimeoutMillis <= 1000) {
+            throw new Exception("--ack-timeout-millis must be 0 or greater than 1000");
         }
     }
     @Override
@@ -296,7 +314,14 @@ public class PerformanceConsumer extends PerformanceTopicListArguments{
                 recorder.recordValue(latencyMillis);
                 cumulativeRecorder.recordValue(latencyMillis);
             }
-            if (this.isEnableTransaction) {
+            if (this.processingDelayMillis > 0) {
+                try {
+                    Thread.sleep(this.processingDelayMillis);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            if (this.ackMode == AckMode.ack && this.isEnableTransaction) {
                 try {
                     messageReceiveLimiter.acquire();
                 } catch (InterruptedException e){
@@ -314,7 +339,7 @@ public class PerformanceConsumer extends PerformanceTopicListArguments{
                     }
                     return null;
                 });
-            } else {
+            } else if (this.ackMode == AckMode.ack) {
                 consumer.acknowledgeAsync(msg).thenRun(()->{
                             totalMessageAck.increment();
                             messageAck.increment();
@@ -397,29 +422,7 @@ public class PerformanceConsumer extends PerformanceTopicListArguments{
         };
 
         List<Future<Consumer<ByteBuffer>>> futures = new ArrayList<>();
-        ConsumerBuilder<ByteBuffer> consumerBuilder = pulsarClient.newConsumer(Schema.BYTEBUFFER) //
-                .messageListener(listener) //
-                .receiverQueueSize(this.receiverQueueSize) //
-                .maxTotalReceiverQueueSizeAcrossPartitions(this.maxTotalReceiverQueueSizeAcrossPartitions)
-                .acknowledgmentGroupTime(this.acknowledgmentsGroupingDelayMillis, TimeUnit.MILLISECONDS) //
-                .subscriptionType(this.subscriptionType)
-                .subscriptionInitialPosition(this.subscriptionInitialPosition)
-                .autoAckOldestChunkedMessageOnQueueFull(this.autoAckOldestChunkedMessageOnQueueFull)
-                .enableBatchIndexAcknowledgment(this.batchIndexAck)
-                .poolMessages(this.poolMessages)
-                .replicateSubscriptionState(this.replicatedSubscription)
-                .autoScaledReceiverQueueSizeEnabled(this.autoScaledReceiverQueueSize);
-        if (this.maxPendingChunkedMessage > 0) {
-            consumerBuilder.maxPendingChunkedMessage(this.maxPendingChunkedMessage);
-        }
-        if (this.expireTimeOfIncompleteChunkedMessageMs > 0) {
-            consumerBuilder.expireTimeOfIncompleteChunkedMessage(this.expireTimeOfIncompleteChunkedMessageMs,
-                    TimeUnit.MILLISECONDS);
-        }
-
-        if (isNotBlank(this.encKeyFile)) {
-            consumerBuilder.defaultCryptoKeyReader(this.encKeyFile);
-        }
+        ConsumerBuilder<ByteBuffer> consumerBuilder = createConsumerBuilder(pulsarClient, listener);
 
         for (int i = 0; i < this.numTopics; i++) {
             final TopicName topicName = TopicName.get(this.topics.get(i));
@@ -589,6 +592,37 @@ public class PerformanceConsumer extends PerformanceTopicListArguments{
                 totalMessagesReceived.sum(), rate, throughput, rateAck, totalnumMessageAckFailed);
     }
 
+    ConsumerBuilder<ByteBuffer> createConsumerBuilder(PulsarClient pulsarClient,
+                                                      MessageListener<ByteBuffer> listener) {
+        ConsumerBuilder<ByteBuffer> consumerBuilder = pulsarClient.newConsumer(Schema.BYTEBUFFER) //
+                .messageListener(listener) //
+                .receiverQueueSize(this.receiverQueueSize) //
+                .maxTotalReceiverQueueSizeAcrossPartitions(this.maxTotalReceiverQueueSizeAcrossPartitions)
+                .acknowledgmentGroupTime(this.acknowledgmentsGroupingDelayMillis, TimeUnit.MILLISECONDS) //
+                .subscriptionType(this.subscriptionType)
+                .subscriptionInitialPosition(this.subscriptionInitialPosition)
+                .autoAckOldestChunkedMessageOnQueueFull(this.autoAckOldestChunkedMessageOnQueueFull)
+                .enableBatchIndexAcknowledgment(this.batchIndexAck)
+                .poolMessages(this.poolMessages)
+                .replicateSubscriptionState(this.replicatedSubscription)
+                .autoScaledReceiverQueueSizeEnabled(this.autoScaledReceiverQueueSize);
+        if (this.maxPendingChunkedMessage > 0) {
+            consumerBuilder.maxPendingChunkedMessage(this.maxPendingChunkedMessage);
+        }
+        if (this.expireTimeOfIncompleteChunkedMessageMs > 0) {
+            consumerBuilder.expireTimeOfIncompleteChunkedMessage(this.expireTimeOfIncompleteChunkedMessageMs,
+                    TimeUnit.MILLISECONDS);
+        }
+        if (this.ackTimeoutMillis > 0) {
+            consumerBuilder.ackTimeout(this.ackTimeoutMillis, TimeUnit.MILLISECONDS);
+        }
+
+        if (isNotBlank(this.encKeyFile)) {
+            consumerBuilder.defaultCryptoKeyReader(this.encKeyFile);
+        }
+        return consumerBuilder;
+    }
+
     private static void printAggregatedStats() {
         Histogram reportHistogram = cumulativeRecorder.getIntervalHistogram();
 
@@ -604,5 +638,9 @@ public class PerformanceConsumer extends PerformanceTopicListArguments{
                 reportHistogram.getValueAtPercentile(99.99),
                 reportHistogram.getValueAtPercentile(99.999),
                 reportHistogram.getMaxValue());
+    }
+
+    public enum AckMode {
+        ack, none
     }
 }
