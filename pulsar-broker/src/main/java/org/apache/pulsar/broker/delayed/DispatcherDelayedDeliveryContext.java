@@ -40,6 +40,11 @@ public class DispatcherDelayedDeliveryContext implements DelayedDeliveryContext 
     }
 
     @Override
+    public Object getTriggerLock() {
+        return dispatcher;
+    }
+
+    @Override
     public void triggerReadMoreEntries() {
         synchronized (dispatcher) {
             dispatcher.readMoreEntriesAsync();

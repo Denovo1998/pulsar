@@ -65,6 +65,12 @@ import org.apache.pulsar.metadata.impl.ZKMetadataStore;
 @ToString
 public class ServiceConfiguration implements PulsarConfiguration {
 
+    /**
+     * Default name of the internal advertised listener used for broker-to-broker communication
+     * within a Pulsar cluster.
+     */
+    public static final String DEFAULT_INTERNAL_LISTENER_NAME = "internal";
+
     @Category
     private static final String CATEGORY_SERVER = "Server";
     @Category
@@ -169,26 +175,32 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
         category = CATEGORY_SERVER,
-        doc = "The port for serving binary protobuf requests."
-            + " If set, defines a server binding for bindAddress:brokerServicePort."
-            + " The Default value is 6650."
+        doc = "Port for the Pulsar binary protocol of the internal listener."
+            + " The same port number is used both for the local socket binding (with `bindAddress`)"
+            + " and for the advertised URL (with `advertisedAddress`), so no entry in"
+            + " `advertisedListeners` or `bindAddresses` is required for the internal listener."
+            + " Default is 6650."
     )
 
     private Optional<Integer> brokerServicePort = Optional.of(6650);
     @FieldContext(
         category = CATEGORY_SERVER,
-        doc = "The port for serving TLS-secured binary protobuf requests."
-            + " If set, defines a server binding for bindAddress:brokerServicePortTls."
+        doc = "Port for the Pulsar binary protocol TLS endpoint of the internal listener."
+            + " Used both for the local socket binding and the advertised URL."
+            + " By default TLS is disabled."
     )
     private Optional<Integer> brokerServicePortTls = Optional.empty();
     @FieldContext(
         category = CATEGORY_SERVER,
-        doc = "The port for serving http requests"
+        doc = "Port for the HTTP admin/REST endpoint of the internal listener."
+            + " Used both for the local socket binding and the advertised URL."
     )
     private Optional<Integer> webServicePort = Optional.of(8080);
     @FieldContext(
         category = CATEGORY_SERVER,
-        doc = "The port for serving https requests"
+        doc = "Port for the HTTPS admin/REST endpoint of the internal listener."
+            + " Used both for the local socket binding and the advertised URL."
+            + " By default TLS is disabled."
     )
     private Optional<Integer> webServicePortTls = Optional.empty();
 
@@ -214,38 +226,75 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
         category = CATEGORY_SERVER,
-        doc = "Hostname or IP address the service binds on"
+        doc = "Local network interface IP for the internal listener's port bindings."
+            + " Use a specific local IP to bind to a single interface, or `0.0.0.0` to bind on all"
+            + " interfaces. Default is `0.0.0.0`."
     )
     private String bindAddress = "0.0.0.0";
 
     @FieldContext(
         category = CATEGORY_SERVER,
-        doc = "Hostname or IP address the service advertises to the outside world."
-            + " If not set, the value of `InetAddress.getLocalHost().getCanonicalHostName()` is used."
+        doc = "Hostname or IP advertised to clients for the internal listener."
+            + " Combined with the *Port properties it forms the internal listener's advertised URLs"
+            + " (e.g. `pulsar://<advertisedAddress>:<brokerServicePort>`)."
+            + " If not set, defaults to `InetAddress.getLocalHost().getCanonicalHostName()`."
     )
     private String advertisedAddress;
 
     @FieldContext(category = CATEGORY_SERVER,
-            doc = "Used to specify multiple advertised listeners for the broker."
-                    + " The value must format as <listener_name>:pulsar://<host>:<port>,"
-                    + "multiple listeners should separate with commas."
-                    + "Do not use this configuration with advertisedAddress and brokerServicePort."
-                    + "The Default value is absent means use advertisedAddress and brokerServicePort.")
+            doc = "Declares additional advertised listeners — typically external listeners that"
+                    + " complement the internal one.\n"
+                    + " Format: comma-separated `<listener_name>:<scheme>://<host>:<port>` entries."
+                    + " Supported schemes: `pulsar`, `pulsar+ssl`, `http`, `https`."
+                    + " A listener name may be repeated to declare multiple schemes for the same listener.\n"
+                    + " The internal listener is auto-configured from `advertisedAddress` plus the *Port"
+                    + " properties (`brokerServicePort` / `brokerServicePortTls` / `webServicePort` /"
+                    + " `webServicePortTls`) so it does not need an entry here. URLs declared here under"
+                    + " `internalListenerName` do override that auto-configured listener, but this is"
+                    + " not recommended because it can route cluster-internal traffic through an external"
+                    + " endpoint (for example, an external load balancer).\n"
+                    + " Legacy fallback: when `internalListenerName` is left blank, the first listener"
+                    + " parsed from this property is used as the internal listener (so in that case its"
+                    + " entry here is required).")
     private String advertisedListeners;
 
     @FieldContext(category = CATEGORY_SERVER,
-            doc = "Used to specify the internal listener name for the broker."
-                    + "The listener name must contain in the advertisedListeners."
-                    + "The Default value is absent, the broker uses the first listener as the internal listener.")
-    private String internalListenerName;
+            doc = "Name of the listener used for cluster-internal broker-to-broker communication"
+                    + " (lookup redirects, admin forwarding to owner or leader broker). Defaults to"
+                    + " `internal`.\n"
+                    + " When set (the default), the internal listener is auto-configured from"
+                    + " `advertisedAddress` plus the *Port properties. The internal listener must"
+                    + " advertise addresses reachable from other brokers in the same cluster; avoid"
+                    + " overriding its URLs in `advertisedListeners` to point at an external load"
+                    + " balancer because that would route cluster-internal traffic outside the cluster."
+                    + " For external clients, declare a separate non-internal listener in"
+                    + " `advertisedListeners` instead. The default name `internal` also keeps the"
+                    + " port-derived internal listener distinct from any user-declared listener names.\n"
+                    + " Setting this to an empty string restores the legacy fallback: the first listener"
+                    + " parsed from `advertisedListeners` is used as the internal listener.")
+    private String internalListenerName = DEFAULT_INTERNAL_LISTENER_NAME;
 
     @FieldContext(category = CATEGORY_SERVER,
-            doc = "Used to specify additional bind addresses for the broker."
-                    + " The value must format as <listener_name>:<scheme>://<host>:<port>,"
-                    + " multiple bind addresses should be separated with commas."
-                    + " Associates each bind address with an advertised listener and protocol handler."
-                    + " Note that the brokerServicePort, brokerServicePortTls, webServicePort, and"
-                    + " webServicePortTls properties define additional bindings.")
+            doc = "Per-listener socket bindings.\n"
+                    + " The internal listener's bindings are derived automatically from `bindAddress`"
+                    + " plus the port properties (`brokerServicePort` / `brokerServicePortTls` /"
+                    + " `webServicePort` / `webServicePortTls`) and do not need to be repeated here.\n"
+                    + " PIP-95 smart listener selection routes a connection to the listener whose port"
+                    + " it arrived on. For the Pulsar binary protocol (`pulsar` / `pulsar+ssl`) this is"
+                    + " optional — clients can also pass an explicit `listenerName`. For the HTTP/HTTPS"
+                    + " Admin API (`http` / `https`) it is the only routing mechanism, so every"
+                    + " HTTP/HTTPS advertised listener reachable from outside the cluster needs a"
+                    + " dedicated entry here on a unique port. This lets a layer-4 TCP load balancer"
+                    + " serve the Admin API directly per listener, without an HTTP reverse proxy.\n"
+                    + " Format: comma-separated `<listener_name>:<scheme>://<ip>:<port>` entries."
+                    + " Supported schemes: `pulsar`, `pulsar+ssl`, `http`, `https`."
+                    + " The `<ip>` part selects which local network interface the port binds to:"
+                    + " use a specific local IP, or `0.0.0.0` to bind on all interfaces."
+                    + " A local hostname is also accepted but not recommended.\n"
+                    + " Each `ip:port` may be bound by exactly one (listener, scheme) pair. An entry"
+                    + " that exactly matches the auto-derived internal-listener binding is tolerated;"
+                    + " assigning the same `ip:port` to a different listener or scheme fails validation.\n"
+                    + " Port `0` (OS-assigned ephemeral port) is supported only for the internal listener.")
     private String bindAddresses;
 
     @FieldContext(category = CATEGORY_SERVER,
@@ -346,6 +395,12 @@ public class ServiceConfiguration implements PulsarConfiguration {
                     + " Default is set to 8192."
     )
     private int httpServerAcceptQueueSize = 8192;
+
+    @FieldContext(
+            category = CATEGORY_HTTP,
+            doc = "Idle timeout for HTTP server connections in milliseconds."
+    )
+    private int httpServerIdleTimeout = 30 * 1000;
 
     @FieldContext(category = CATEGORY_SERVER, doc = "Maximum number of inbound http connections. "
             + "(0 to disable limiting)")
@@ -486,11 +541,27 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private int metadataStoreCacheExpirySeconds = 300;
 
+    private static final String DEFAULT_EXTENDED_RESOURCES_CLASS_NAME =
+            "org.apache.pulsar.broker.DefaultPulsarResourcesExtended";
+
+    @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "The class name of the PulsarResourcesExtended implementation. "
+                    + "This class must implement org.apache.pulsar.broker.PulsarResourcesExtended."
+    )
+    private String pulsarResourcesExtendedClassName = DEFAULT_EXTENDED_RESOURCES_CLASS_NAME;
+
     @FieldContext(
             category = CATEGORY_SERVER,
             doc = "Is metadata store read-only operations."
     )
     private boolean metadataStoreAllowReadOnlyOperations;
+
+    @FieldContext(
+            category = CATEGORY_SERVER,
+            doc = "The number of threads used for serializing and deserializing data to and from the metadata store"
+    )
+    private int metadataStoreSerDesThreads = 1;
 
     @Deprecated
     @FieldContext(
@@ -1253,9 +1324,37 @@ public class ServiceConfiguration implements PulsarConfiguration {
     @FieldContext(
             dynamic = false,
             category = CATEGORY_POLICIES,
-            doc = "Enables evaluating subscription pattern on broker side."
+            doc = "Enables evaluating subscription pattern on broker side. "
+                    + "Note: This config no longer controls watching topic list. "
+                    + "Please use `enableBrokerTopicListWatcher` to control that behavior."
     )
     private boolean enableBrokerSideSubscriptionPatternEvaluation = true;
+
+    @FieldContext(
+            dynamic = false,
+            category = CATEGORY_POLICIES,
+            doc = "Enables watching topic add/remove events on broker side for "
+                    + "subscription pattern evaluation."
+    )
+    private boolean enableBrokerTopicListWatcher = true;
+
+    @FieldContext(
+            dynamic = false,
+            category = CATEGORY_POLICIES,
+            doc = "Enables the scalable-topics V5 API on this broker. When disabled, "
+                    + "the broker advertises supports_scalable_topics=false in CommandConnected "
+                    + "feature flags and rejects scalable-topic commands from clients."
+    )
+    private boolean scalableTopicsEnabled = true;
+
+    @FieldContext(
+            dynamic = false,
+            category = CATEGORY_POLICIES,
+            doc = "Grace period (seconds) the controller leader waits for a disconnected scalable-topic "
+                    + "consumer to reconnect with the same consumer name before evicting its session and "
+                    + "reassigning its segments to remaining consumers."
+    )
+    private int scalableTopicConsumerSessionGracePeriodSeconds = 60;
 
     @FieldContext(
             dynamic = false,
@@ -1548,7 +1647,7 @@ public class ServiceConfiguration implements PulsarConfiguration {
     @FieldContext(
             category = CATEGORY_SERVER,
             doc = "Max number of snapshot to be cached per subscription.")
-    private int replicatedSubscriptionsSnapshotMaxCachedPerSubscription = 10;
+    private int replicatedSubscriptionsSnapshotMaxCachedPerSubscription = 30;
 
     @FieldContext(
             category = CATEGORY_SERVER,
@@ -1700,8 +1799,16 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
             category = CATEGORY_SERVER,
-            doc = "The class name of the topic policies service. The default config only takes affect when the "
-                    + "systemTopicEnable config is true"
+            doc = """
+                    The class name of the topic policies service. There are 2 built-in implementations:
+                    1. "org.apache.pulsar.broker.service.SystemTopicBasedTopicPoliciesService" (default)
+                      It stores a topic's policies in the `__change_events` topic. If `systemTopicEnabled` is false,
+                      the topic policies will just be disabled
+                    2. "org.apache.pulsar.broker.service.MetadataStoreTopicPoliciesService"
+                      It stores a topic's policies in the metadata store. If `systemTopicEnabled` is true and the
+                      topic's namespace has a `__change_events` topic, the policies will still be stored in the
+                      `__change_events` topic for backward compatibility.
+                    """
     )
     private String topicPoliciesServiceClassName =
             "org.apache.pulsar.broker.service.SystemTopicBasedTopicPoliciesService";
@@ -1796,6 +1903,14 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "Enable authentication"
     )
     private boolean authenticationEnabled = false;
+
+    @FieldContext(
+        category = CATEGORY_AUTHENTICATION,
+        doc = "Strictly enforce authentication method. If specified, Pulsar will only attempt to authenticate with "
+                + "the provided method. If no method is provided, authentication fails."
+    )
+    private boolean strictAuthMethod = false;
+
     @FieldContext(
         category = CATEGORY_AUTHENTICATION,
         doc = "Authentication provider name list, which is a list of class names"
@@ -2320,11 +2435,6 @@ public class ServiceConfiguration implements PulsarConfiguration {
             doc = "The type of topic that is allowed to be automatically created.(partitioned/non-partitioned)"
     )
     private TopicType allowAutoTopicCreationType = TopicType.NON_PARTITIONED;
-    @FieldContext(category = CATEGORY_SERVER, dynamic = true,
-            doc = "If 'allowAutoTopicCreation' is true and the name of the topic contains 'cluster',"
-                    + "the topic cannot be automatically created."
-    )
-    private boolean allowAutoTopicCreationWithLegacyNamingScheme = true;
     @FieldContext(category = CATEGORY_SERVER, dynamic = true,
             doc = "If 'strictSubscriptionNameVerification' is true, the new subscription name can only contain"
                 + " (a-zA-Z_0-9) and these special chars -=:."
@@ -2973,6 +3083,15 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private String loadManagerClassName = "org.apache.pulsar.broker.loadbalance.impl.ModularLoadManagerImpl";
 
+    @FieldContext(
+            dynamic = true,
+            category = CATEGORY_LOAD_BALANCER,
+            doc = "When load manager migration is enabled, the broker will redirect requests to another broker if the "
+                    + "load manager on the current broker is not using the load manager of the latest service "
+                    + "lookup data available in the metadata store."
+    )
+    private boolean loadManagerMigrationEnabled = false;
+
     @FieldContext(category = CATEGORY_LOAD_BALANCER, doc = "Name of topic bundle assignment strategy to use")
     private String topicBundleAssignmentStrategy =
             "org.apache.pulsar.common.naming.ConsistentHashingTopicBundleAssigner";
@@ -2994,7 +3113,11 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "Option to override the auto-detected network interfaces max speed"
     )
     private Optional<Double> loadBalancerOverrideBrokerNicSpeedGbps = Optional.empty();
-
+    @FieldContext(
+            category = CATEGORY_LOAD_BALANCER,
+            doc = "Option to override the auto-detected network interfaces"
+    )
+    private List<String> loadBalancerOverrideBrokerNics = new ArrayList<>();
     @FieldContext(
         category = CATEGORY_LOAD_BALANCER,
         dynamic = true,
@@ -3384,6 +3507,16 @@ public class ServiceConfiguration implements PulsarConfiguration {
     )
     private SchemaCompatibilityStrategy schemaCompatibilityStrategy = SchemaCompatibilityStrategy.FULL;
 
+    @FieldContext(
+        category = CATEGORY_SCHEMA,
+        doc = "Whether to allow legacy Jackson JsonSchema format for SchemaType.JSON schema definitions. "
+            + "When false (default), only valid Apache Avro schema format is accepted for SchemaType.JSON, "
+            + "consistent with what the consumer side requires. When true, the pre-2.1 backward-compatible "
+            + "behavior is preserved for deployments that still have topics with legacy-format schemas. "
+            + "See PIP-464 for details."
+    )
+    private boolean schemaJsonAllowLegacyJacksonFormat = false;
+
     /**** --- WebSocket. --- ****/
     @FieldContext(
         category = CATEGORY_WEBSOCKET,
@@ -3509,6 +3642,21 @@ public class ServiceConfiguration implements PulsarConfiguration {
             doc = "Enable expose the broker bundles metrics."
     )
     private boolean exposeBundlesMetricsInPrometheus = false;
+
+    @FieldContext(
+            category = CATEGORY_METRICS,
+            doc = "Enable or disable custom topic metric labels feature. "
+                    + "If enabled, custom metric labels can be set on topics and will be exposed in metrics. "
+                    + "Default is false."
+    )
+    private boolean exposeCustomTopicMetricLabelsEnabled = false;
+
+    @FieldContext(
+            category = CATEGORY_METRICS,
+            doc = "A comma-separated list of Topic Property keys that are allowed to be exposed as metrics."
+            + "Only keys explicitly listed here will be exposed."
+    )
+    private Set<String> allowedTopicPropertyKeysForMetrics = new HashSet<>();
 
     /**** --- Functions. --- ****/
     @FieldContext(
@@ -3648,6 +3796,17 @@ public class ServiceConfiguration implements PulsarConfiguration {
     private boolean transactionCoordinatorEnabled = false;
 
     @FieldContext(
+            category = CATEGORY_TRANSACTION,
+            doc = "Enable the metadata-driven transaction coordinator used by scalable topics."
+                    + " When true, wire commands (NEW_TXN / END_TXN / etc.) are served by the"
+                    + " metadata-store-backed coordinator instead of the legacy"
+                    + " TransactionMetadataStoreService. Requires transactionCoordinatorEnabled"
+                    + " = true, and must be enabled together with the scalable-topic transaction"
+                    + " buffer and pending-ack store providers."
+    )
+    private boolean transactionCoordinatorScalableTopicsEnabled = false;
+
+    @FieldContext(
         category = CATEGORY_TRANSACTION,
             doc = "Class name for transaction metadata store provider"
     )
@@ -3656,7 +3815,11 @@ public class ServiceConfiguration implements PulsarConfiguration {
 
     @FieldContext(
             category = CATEGORY_TRANSACTION,
-            doc = "Class name for transaction buffer provider"
+            doc = "Class name for transaction buffer provider. Default routes segment:// topics to the"
+                    + " legacy TopicTransactionBuffer. Set this to"
+                    + " org.apache.pulsar.broker.transaction.buffer.impl.DispatchingTransactionBufferProvider"
+                    + " once the v5 transaction coordinator (PIP-473 P5) is enabled to opt segment topics"
+                    + " into MetadataTransactionBuffer."
     )
     private String transactionBufferProviderClassName =
             "org.apache.pulsar.broker.transaction.buffer.impl.TopicTransactionBufferProvider";
@@ -4000,6 +4163,24 @@ public class ServiceConfiguration implements PulsarConfiguration {
         doc = "The bookkeeper ledger root path"
     )
     private String packagesManagementLedgerRootPath = "/ledgers";
+
+    @FieldContext(
+        category = CATEGORY_PACKAGES_MANAGEMENT,
+        doc = "Whether new package metadata writes use JSON (safe) or the legacy Java serialization format. "
+            + "Defaults to true. Set to false only as a temporary rollback path; the legacy format will be "
+            + "removed in a future release."
+    )
+    private boolean packagesManagementJsonSerializationEnabled = true;
+
+    @FieldContext(
+        category = CATEGORY_PACKAGES_MANAGEMENT,
+        doc = "Whether to accept reading legacy Java-serialized package metadata written by older brokers. "
+            + "A strict ObjectInputFilter allowlist is applied unconditionally whenever the legacy path "
+            + "runs. Defaults to true for upgrade compatibility; disable once all existing packages have "
+            + "been re-uploaded or rewritten via updateMeta. This default is scheduled to flip to false in "
+            + "a future release."
+    )
+    private boolean packagesManagementAllowLegacyJavaSerialization = true;
 
     /* packages management service configurations (end) */
 

@@ -26,5 +26,7 @@ public interface DelayedDeliveryContext {
 
     ManagedCursor getCursor();
 
+    Object getTriggerLock();
+
     void triggerReadMoreEntries();
 }

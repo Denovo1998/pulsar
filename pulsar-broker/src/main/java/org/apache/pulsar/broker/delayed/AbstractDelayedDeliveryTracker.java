@@ -18,16 +18,18 @@
  */
 package org.apache.pulsar.broker.delayed;
 
+import io.github.merlimat.slog.Logger;
 import io.netty.util.Timeout;
 import io.netty.util.Timer;
 import io.netty.util.TimerTask;
 import java.time.Clock;
 import java.util.concurrent.TimeUnit;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.pulsar.broker.service.persistent.AbstractPersistentDispatcherMultipleConsumers;
 
-@Slf4j
 public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryTracker, TimerTask {
+
+    private static final Logger LOG = Logger.get(AbstractDelayedDeliveryTracker.class);
+    protected final Logger log;
 
     protected final DelayedDeliveryContext context;
 
@@ -48,8 +50,7 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
     protected final Clock clock;
 
     private final boolean isDelayedDeliveryDeliverAtTimeStrict;
-
-    private final Object timerStateLock = new Object();
+    private final Object triggerLock;
 
     public AbstractDelayedDeliveryTracker(AbstractPersistentDispatcherMultipleConsumers dispatcher, Timer timer,
                                           long tickTimeMillis,
@@ -75,10 +76,12 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
                                           long tickTimeMillis, Clock clock,
                                           boolean isDelayedDeliveryDeliverAtTimeStrict) {
         this.context = context;
+        this.triggerLock = context.getTriggerLock();
         this.timer = timer;
         this.tickTimeMillis = tickTimeMillis;
         this.clock = clock;
         this.isDelayedDeliveryDeliverAtTimeStrict = isDelayedDeliveryDeliverAtTimeStrict;
+        this.log = LOG.with().attr("dispatcher", context.getName()).build();
     }
 
     /**
@@ -137,19 +140,16 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
                 return;
             }
 
-            // Compute the earliest time that we schedule the timer to run.
-            long remainingTickDelayMillis = lastTickRun + tickTimeMillis - now;
-            long calculatedDelayMillis = Math.max(delayMillis, remainingTickDelayMillis);
+        // Compute the earliest time that we schedule the timer to run.
+        long remainingTickDelayMillis = lastTickRun + tickTimeMillis - now;
+        long calculatedDelayMillis = Math.max(delayMillis, remainingTickDelayMillis);
 
-            if (log.isDebugEnabled()) {
-                log.debug("[{}] Start timer in {} millis", context.getName(), calculatedDelayMillis);
-            }
+        log.debug().attr("delayMillis", calculatedDelayMillis).log("Start timer");
 
-            // Even though we may delay longer than this timestamp because of the tick delay, we still track the
-            // current timeout with reference to the next message's timestamp.
-            currentTimeoutTarget = timestamp;
-            timeout = timer.newTimeout(this, calculatedDelayMillis, TimeUnit.MILLISECONDS);
-        }
+        // Even though we may delay longer than this timestamp because of the tick delay, we still track the
+        // current timeout with reference to the next message's timestamp.
+        currentTimeoutTarget = timestamp;
+        timeout = timer.newTimeout(this, calculatedDelayMillis, TimeUnit.MILLISECONDS);
     }
 
     protected final void scheduleImmediateRun() {
@@ -163,14 +163,12 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
 
     @Override
     public void run(Timeout timeout) throws Exception {
-        if (log.isDebugEnabled()) {
-            log.debug("[{}] Timer triggered", context.getName());
-        }
-        if (timeout == null || timeout.isCancelled()) {
+            log.debug("Timer triggered");
+                if (timeout == null || timeout.isCancelled()) {
             return;
         }
 
-        synchronized (timerStateLock) {
+        synchronized (triggerLock) {
             lastTickRun = clock.millis();
             currentTimeoutTarget = -1;
             this.timeout = null;
@@ -180,7 +178,7 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
 
     @Override
     public void close() {
-        synchronized (timerStateLock) {
+        synchronized (triggerLock) {
             if (timeout != null) {
                 timeout.cancel();
                 timeout = null;

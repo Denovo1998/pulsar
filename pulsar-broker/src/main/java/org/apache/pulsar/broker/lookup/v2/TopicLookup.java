@@ -33,7 +33,6 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.container.AsyncResponse;
 import javax.ws.rs.container.Suspended;
 import javax.ws.rs.core.MediaType;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.pulsar.broker.lookup.TopicLookupBase;
 import org.apache.pulsar.common.lookup.data.LookupData;
@@ -41,10 +40,10 @@ import org.apache.pulsar.common.naming.TopicName;
 
 @Path("/v2/topic")
 @Api(value = "lookup", tags = "lookup")
-@Slf4j
 public class TopicLookup extends TopicLookupBase {
 
     static final String LISTENERNAME_HEADER = "X-Pulsar-ListenerName";
+    public static final String LISTENERNAME_PARAM = "listenerName";
 
     @GET
     @Path("{topic-domain}/{tenant}/{namespace}/{topic}")
@@ -60,7 +59,7 @@ public class TopicLookup extends TopicLookupBase {
             @PathParam("topic-domain") String topicDomain, @PathParam("tenant") String tenant,
             @PathParam("namespace") String namespace, @PathParam("topic") @Encoded String encodedTopic,
             @QueryParam("authoritative") @DefaultValue("false") boolean authoritative,
-            @QueryParam("listenerName") String listenerName,
+            @QueryParam(LISTENERNAME_PARAM) String listenerName,
             @HeaderParam(LISTENERNAME_HEADER) String listenerNameHeader) {
         TopicName topicName = getTopicName(topicDomain, tenant, namespace, encodedTopic);
         if (StringUtils.isEmpty(listenerName) && StringUtils.isNotEmpty(listenerNameHeader)) {
@@ -69,10 +68,11 @@ public class TopicLookup extends TopicLookupBase {
         internalLookupTopicAsync(topicName, authoritative, listenerName)
                 .thenAccept(lookupData -> asyncResponse.resume(lookupData))
                 .exceptionally(ex -> {
-                    if (log.isDebugEnabled()) {
-                        log.debug("Failed to check exist for topic {} when lookup", topicName, ex);
-                    }
-                    resumeAsyncResponseExceptionally(asyncResponse, ex);
+                        log.debug()
+                                .attr("topic", topicName)
+                                .exception(ex)
+                                .log("Failed to check exist for topic when lookup");
+                                        resumeAsyncResponseExceptionally(asyncResponse, ex);
                     return null;
                 });
     }

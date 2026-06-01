@@ -63,6 +63,12 @@ import org.openjdk.jmh.annotations.Warmup;
 @Fork(1)
 public class BucketDelayedDeliveryTrackerBenchmark {
 
+    /**
+     * Fixed delivery timestamp base that stays far beyond any benchmark trial duration,
+     * so scheduled tasks will not start firing while throughput is being measured.
+     */
+    private static final long FUTURE_DELIVERY_BASE_TIME_MILLIS = 4102444800000L; // 2100-01-01T00:00:00Z
+
     @Param({"90_10", "80_20", "70_30", "50_50"})
     public String readWriteRatio;
 
@@ -74,6 +80,8 @@ public class BucketDelayedDeliveryTrackerBenchmark {
     private MockBucketSnapshotStorage storage;
     private NoopDelayedDeliveryContext context;
     private AtomicLong messageIdGenerator;
+    private int readPercentage;
+    private long futureDeliveryBaseTimeMillis;
     /**
      * Maximum number of additional unique (ledgerId, entryId) positions to
      * introduce per trial on top of {@link #initialMessages}. This allows
@@ -105,6 +113,9 @@ public class BucketDelayedDeliveryTrackerBenchmark {
     public void setup() throws Exception {
         setupMockComponents();
         createTracker();
+        String[] parts = readWriteRatio.split("_");
+        readPercentage = Integer.parseInt(parts[0]);
+        futureDeliveryBaseTimeMillis = FUTURE_DELIVERY_BASE_TIME_MILLIS;
         preloadMessages();
         messageIdGenerator = new AtomicLong(initialMessages + 1);
         // Allow a bounded number of additional unique messages per trial to avoid
@@ -143,9 +154,14 @@ public class BucketDelayedDeliveryTrackerBenchmark {
     }
 
     private void preloadMessages() {
+        // Preload messages to create realistic test conditions while keeping
+        // delivery timestamps far beyond the benchmark trial duration so the
+        // tracker's timer does not start firing during measurement.
+        long baseTime = futureDeliveryBaseTimeMillis;
         // Preload messages to create realistic test conditions
         long baseTime = System.currentTimeMillis() + 10000; // Future delivery
         for (int i = 1; i <= initialMessages; i++) {
+            tracker.addMessage(i, i, baseTime + i * 1000L);
             tracker.addMessage(i, i, baseTime + i * 1000);
         }
     }
@@ -213,6 +229,7 @@ public class BucketDelayedDeliveryTrackerBenchmark {
     }
 
     private boolean performWriteOperation() {
+        long deliverAt = futureDeliveryBaseTimeMillis + ThreadLocalRandom.current().nextLong(5000, 30000);
         long deliverAt = System.currentTimeMillis() + ThreadLocalRandom.current().nextLong(5000, 30000);
         return addMessageSequential(deliverAt, 1000);
     }
@@ -232,6 +249,7 @@ public class BucketDelayedDeliveryTrackerBenchmark {
     @Benchmark
     @Threads(4)
     public boolean benchmarkConcurrentAddMessage() {
+        long deliverAt = futureDeliveryBaseTimeMillis + ThreadLocalRandom.current().nextLong(10000, 60000);
         long deliverAt = System.currentTimeMillis() + ThreadLocalRandom.current().nextLong(10000, 60000);
         return addMessageSequential(deliverAt, 1000);
     }

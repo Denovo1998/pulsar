@@ -22,17 +22,18 @@ import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
+import lombok.CustomLog;
 import org.apache.pulsar.common.functions.FunctionDefinition;
 import org.apache.pulsar.functions.runtime.thread.ThreadRuntimeFactory;
 import org.apache.pulsar.functions.utils.functions.FunctionArchive;
 import org.apache.pulsar.functions.utils.functions.FunctionUtils;
 
-@Slf4j
+@CustomLog
 public class FunctionsManager implements AutoCloseable {
-    private TreeMap<String, FunctionArchive> functions;
+    private Map<String, FunctionArchive> functions;
 
     @VisibleForTesting
     public FunctionsManager() {
@@ -61,12 +62,12 @@ public class FunctionsManager implements AutoCloseable {
     }
 
     public void reloadFunctions(WorkerConfig workerConfig) throws IOException {
-        TreeMap<String, FunctionArchive> oldFunctions = functions;
+        Map<String, FunctionArchive> oldFunctions = functions;
         this.functions = createFunctions(workerConfig);
         closeFunctions(oldFunctions);
     }
 
-    private static TreeMap<String, FunctionArchive> createFunctions(WorkerConfig workerConfig) throws IOException {
+    private static Map<String, FunctionArchive> createFunctions(WorkerConfig workerConfig) throws IOException {
         boolean enableClassloading = workerConfig.getEnableClassloadingOfBuiltinFiles()
                 || ThreadRuntimeFactory.class.getName().equals(workerConfig.getFunctionRuntimeFactoryClassName());
         return FunctionUtils.searchForFunctions(workerConfig.getFunctionsDirectory(),
@@ -79,12 +80,12 @@ public class FunctionsManager implements AutoCloseable {
         closeFunctions(functions);
     }
 
-    private void closeFunctions(TreeMap<String, FunctionArchive> functionMap) {
+    private void closeFunctions(Map<String, FunctionArchive> functionMap) {
         functionMap.values().forEach(functionArchive -> {
             try {
                 functionArchive.close();
             } catch (Exception e) {
-                log.warn("Failed to close function archive", e);
+                log.warn().exception(e).log("Failed to close function archive");
             }
         });
         functionMap.clear();

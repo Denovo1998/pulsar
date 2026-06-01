@@ -18,6 +18,7 @@
  */
 package org.apache.pulsar.broker.delayed.bucket;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,8 @@ public class MockBucketSnapshotStorage implements BucketSnapshotStorage {
 
     private final AtomicLong idGenerator = new AtomicLong(1);
     private final Map<Long, SnapshotMetadata> snapshots = new ConcurrentHashMap<>();
+    private final Map<Long, List<SnapshotSegment>> snapshotSegments = new ConcurrentHashMap<>();
+    private final Map<Long, Long> snapshotLengths = new ConcurrentHashMap<>();
 
     @Override
     public CompletableFuture<Long> createBucketSnapshot(SnapshotMetadata snapshotMetadata,
@@ -38,6 +41,12 @@ public class MockBucketSnapshotStorage implements BucketSnapshotStorage {
                                                         String bucketKey, String topicName, String cursorName) {
         long id = idGenerator.getAndIncrement();
         snapshots.put(id, snapshotMetadata);
+        snapshotSegments.put(id, new ArrayList<>(bucketSnapshotSegments));
+        long snapshotLength = snapshotMetadata.toByteArray().length;
+        for (SnapshotSegment bucketSnapshotSegment : bucketSnapshotSegments) {
+            snapshotLength += bucketSnapshotSegment.toByteArray().length;
+        }
+        snapshotLengths.put(id, snapshotLength);
         return CompletableFuture.completedFuture(id);
     }
 
@@ -51,17 +60,35 @@ public class MockBucketSnapshotStorage implements BucketSnapshotStorage {
     public CompletableFuture<List<SnapshotSegment>> getBucketSnapshotSegment(long bucketId,
                                                                              long firstSegmentEntryId,
                                                                              long lastSegmentEntryId) {
-        return CompletableFuture.completedFuture(Collections.emptyList());
+        List<SnapshotSegment> segments = snapshotSegments.get(bucketId);
+        if (segments == null) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Bucket snapshot segments not found: " + bucketId));
+        }
+        if (firstSegmentEntryId > lastSegmentEntryId) {
+            return CompletableFuture.completedFuture(Collections.emptyList());
+        }
+
+        int fromIndex = Math.toIntExact(firstSegmentEntryId - 1);
+        int toIndex = Math.toIntExact(lastSegmentEntryId);
+        if (fromIndex < 0 || fromIndex >= segments.size()) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Invalid first segment entry id: " + firstSegmentEntryId));
+        }
+        toIndex = Math.min(toIndex, segments.size());
+        return CompletableFuture.completedFuture(new ArrayList<>(segments.subList(fromIndex, toIndex)));
     }
 
     @Override
     public CompletableFuture<Long> getBucketSnapshotLength(long bucketId) {
-        return CompletableFuture.completedFuture(0L);
+        return CompletableFuture.completedFuture(snapshotLengths.getOrDefault(bucketId, 0L));
     }
 
     @Override
     public CompletableFuture<Void> deleteBucketSnapshot(long bucketId) {
         snapshots.remove(bucketId);
+        snapshotSegments.remove(bucketId);
+        snapshotLengths.remove(bucketId);
         return CompletableFuture.completedFuture(null);
     }
 
@@ -73,5 +100,7 @@ public class MockBucketSnapshotStorage implements BucketSnapshotStorage {
     @Override
     public void close() throws Exception {
         snapshots.clear();
+        snapshotSegments.clear();
+        snapshotLengths.clear();
     }
 }
