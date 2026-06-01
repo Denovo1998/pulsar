@@ -28,7 +28,6 @@ import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.Getter;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
@@ -106,15 +105,6 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
                                           boolean isDelayedDeliveryDeliverAtTimeStrict,
                                           long fixedDelayDetectionLookahead) {
         super(context, timer, tickTimeMillis, clock, isDelayedDeliveryDeliverAtTimeStrict);
-        this(new DispatcherDelayedDeliveryContext(dispatcher), timer, tickTimeMillis, clock,
-                isDelayedDeliveryDeliverAtTimeStrict, fixedDelayDetectionLookahead);
-    }
-
-    private InMemoryDelayedDeliveryTracker(DelayedDeliveryContext context, Timer timer,
-                                           long tickTimeMillis, Clock clock,
-                                           boolean isDelayedDeliveryDeliverAtTimeStrict,
-                                           long fixedDelayDetectionLookahead) {
-        super(context, timer, tickTimeMillis, clock, isDelayedDeliveryDeliverAtTimeStrict);
         this.log = LOG.with().ctx(super.log).build();
         this.fixedDelayDetectionLookahead = fixedDelayDetectionLookahead;
         this.timestampPrecisionBitCnt = calculateTimestampPrecisionBitCnt(tickTimeMillis);
@@ -155,10 +145,11 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
             return false;
         }
 
-        if (log.isDebugEnabled()) {
-            log.debug("[{}] Add message {}:{} -- Delivery in {} ms ", context.getName(), ledgerId, entryId,
-                    deliverAt - clock.millis());
-        }
+        log.debug()
+                .attr("ledgerId", ledgerId)
+                .attr("entryId", entryId)
+                .attr("deliveryInMs", deliverAt - clock.millis())
+                .log("Add message");
 
         long timestamp = trimLowerBit(deliverAt, timestampPrecisionBitCnt);
 
@@ -254,17 +245,18 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
             }
         }
 
-        if (log.isDebugEnabled()) {
-            log.debug("[{}] Get scheduled messages - found {}", context.getName(), positions.size());
-        }
+        log.debug()
+                .attr("messagesCount", positions.size())
+                .log("Get scheduled messages");
 
         if (delayedMessageMap.isEmpty()) {
             // Reset to initial state
             highestDeliveryTimeTracked = 0;
             messagesHaveFixedDelay = true;
             if (delayedMessagesCount.get() != 0) {
-                log.warn("[{}] Delayed message tracker is empty, but delayedMessagesCount is {}",
-                        context.getName(), delayedMessagesCount.get());
+                log.warn()
+                        .attr("delayedMessagesCount", delayedMessagesCount.get())
+                        .log("Delayed message tracker is empty, but delayedMessagesCount is non-zero");
             }
         }
 

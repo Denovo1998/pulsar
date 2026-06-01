@@ -146,11 +146,10 @@ abstract class Bucket {
             // Using the full dispatcherName as topicName avoids StringIndexOutOfBoundsException
             // while still providing a meaningful identifier to the snapshot storage.
             topicName = dispatcherName;
-            if (log.isDebugEnabled()) {
-                log.debug("Dispatcher name '{}' does not contain expected suffix '{}', "
-                                + "using full dispatcherName as topic name",
-                        dispatcherName, suffix);
-            }
+            log.debug()
+                    .attr("dispatcher", dispatcherName)
+                    .attr("suffix", suffix)
+                    .log("Dispatcher name does not contain expected suffix, using full dispatcherName as topic name");
         }
         return executeWithRetry(
                 () -> bucketSnapshotStorage.createBucketSnapshot(snapshotMetadata, bucketSnapshotSegments, bucketKey,

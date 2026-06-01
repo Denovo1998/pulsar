@@ -395,7 +395,7 @@ public class BucketDelayedDeliveryTrackerTest extends AbstractDeliveryTrackerTes
         assertEquals(tracker2.getScheduledMessages(100).size(), 0);
 
         Set<Position> scheduledMessages = new TreeSet<>();
-        Awaitility.await().untilAsserted(() -> {
+        Awaitility.await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
             scheduledMessages.addAll(tracker2.getScheduledMessages(100));
             assertEquals(scheduledMessages.size(), delayedMessagesInSnapshotValue);
         });

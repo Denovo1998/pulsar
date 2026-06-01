@@ -50,7 +50,8 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
     protected final Clock clock;
 
     private final boolean isDelayedDeliveryDeliverAtTimeStrict;
-    private final Object triggerLock;
+
+    private final Object timerStateLock = new Object();
 
     public AbstractDelayedDeliveryTracker(AbstractPersistentDispatcherMultipleConsumers dispatcher, Timer timer,
                                           long tickTimeMillis,
@@ -76,7 +77,6 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
                                           long tickTimeMillis, Clock clock,
                                           boolean isDelayedDeliveryDeliverAtTimeStrict) {
         this.context = context;
-        this.triggerLock = context.getTriggerLock();
         this.timer = timer;
         this.tickTimeMillis = tickTimeMillis;
         this.clock = clock;
@@ -140,16 +140,17 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
                 return;
             }
 
-        // Compute the earliest time that we schedule the timer to run.
-        long remainingTickDelayMillis = lastTickRun + tickTimeMillis - now;
-        long calculatedDelayMillis = Math.max(delayMillis, remainingTickDelayMillis);
+            // Compute the earliest time that we schedule the timer to run.
+            long remainingTickDelayMillis = lastTickRun + tickTimeMillis - now;
+            long calculatedDelayMillis = Math.max(delayMillis, remainingTickDelayMillis);
 
-        log.debug().attr("delayMillis", calculatedDelayMillis).log("Start timer");
+            log.debug().attr("delayMillis", calculatedDelayMillis).log("Start timer");
 
-        // Even though we may delay longer than this timestamp because of the tick delay, we still track the
-        // current timeout with reference to the next message's timestamp.
-        currentTimeoutTarget = timestamp;
-        timeout = timer.newTimeout(this, calculatedDelayMillis, TimeUnit.MILLISECONDS);
+            // Even though we may delay longer than this timestamp because of the tick delay, we still track the
+            // current timeout with reference to the next message's timestamp.
+            currentTimeoutTarget = timestamp;
+            timeout = timer.newTimeout(this, calculatedDelayMillis, TimeUnit.MILLISECONDS);
+        }
     }
 
     protected final void scheduleImmediateRun() {
@@ -163,12 +164,12 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
 
     @Override
     public void run(Timeout timeout) throws Exception {
-            log.debug("Timer triggered");
-                if (timeout == null || timeout.isCancelled()) {
+        log.debug().log("Timer triggered");
+        if (timeout == null || timeout.isCancelled()) {
             return;
         }
 
-        synchronized (triggerLock) {
+        synchronized (timerStateLock) {
             lastTickRun = clock.millis();
             currentTimeoutTarget = -1;
             this.timeout = null;
@@ -178,7 +179,7 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
 
     @Override
     public void close() {
-        synchronized (triggerLock) {
+        synchronized (timerStateLock) {
             if (timeout != null) {
                 timeout.cancel();
                 timeout = null;

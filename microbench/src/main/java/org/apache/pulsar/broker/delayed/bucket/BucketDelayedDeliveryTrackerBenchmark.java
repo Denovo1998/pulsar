@@ -158,11 +158,8 @@ public class BucketDelayedDeliveryTrackerBenchmark {
         // delivery timestamps far beyond the benchmark trial duration so the
         // tracker's timer does not start firing during measurement.
         long baseTime = futureDeliveryBaseTimeMillis;
-        // Preload messages to create realistic test conditions
-        long baseTime = System.currentTimeMillis() + 10000; // Future delivery
         for (int i = 1; i <= initialMessages; i++) {
             tracker.addMessage(i, i, baseTime + i * 1000L);
-            tracker.addMessage(i, i, baseTime + i * 1000);
         }
     }
 
@@ -230,7 +227,6 @@ public class BucketDelayedDeliveryTrackerBenchmark {
 
     private boolean performWriteOperation() {
         long deliverAt = futureDeliveryBaseTimeMillis + ThreadLocalRandom.current().nextLong(5000, 30000);
-        long deliverAt = System.currentTimeMillis() + ThreadLocalRandom.current().nextLong(5000, 30000);
         return addMessageSequential(deliverAt, 1000);
     }
 
@@ -250,7 +246,6 @@ public class BucketDelayedDeliveryTrackerBenchmark {
     @Threads(4)
     public boolean benchmarkConcurrentAddMessage() {
         long deliverAt = futureDeliveryBaseTimeMillis + ThreadLocalRandom.current().nextLong(10000, 60000);
-        long deliverAt = System.currentTimeMillis() + ThreadLocalRandom.current().nextLong(10000, 60000);
         return addMessageSequential(deliverAt, 1000);
     }
 

@@ -122,6 +122,7 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
         final int totalMessages = 5000;
         final CountDownLatch startLatch = new CountDownLatch(1);
         final CountDownLatch readersDone = new CountDownLatch(numReadThreads);
+        final CountDownLatch writerDone = new CountDownLatch(1);
         final AtomicInteger errors = new AtomicInteger(0);
         final AtomicReference<Exception> firstException = new AtomicReference<>();
         final AtomicInteger messagesAdded = new AtomicInteger(0);
@@ -176,11 +177,14 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
                 errors.incrementAndGet();
                 firstException.compareAndSet(null, e);
                 e.printStackTrace();
+            } finally {
+                writerDone.countDown();
             }
         });
 
         startLatch.countDown();
         assertTrue(readersDone.await(30, TimeUnit.SECONDS), "Readers should complete within 30 seconds");
+        assertTrue(writerDone.await(30, TimeUnit.SECONDS), "Writer should complete within 30 seconds");
 
         if (errors.get() > 0) {
             Exception exception = firstException.get();
