@@ -785,7 +785,11 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 drainQueue(firstSegmentQueue, sharedBucketPriorityQueue);
                 afterCreateImmutableBucket(immutableBucketDelayedIndexPair, createStartTime);
                 clearBucketBeingSealedUnsafe(bucketToSeal);
-                updateTimer();
+                if (!sharedBucketPriorityQueue.isEmpty() && sharedBucketPriorityQueue.peekN1() <= getCutoffTime()) {
+                    scheduleImmediateRun();
+                } else {
+                    updateTimer();
+                }
 
                 if (maxNumBuckets > 0 && immutableBuckets.asMapOfRanges().size() > maxNumBuckets) {
                     asyncMergeBucketSnapshot();

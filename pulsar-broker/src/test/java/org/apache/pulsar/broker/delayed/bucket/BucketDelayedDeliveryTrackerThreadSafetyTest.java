@@ -19,7 +19,6 @@
 package org.apache.pulsar.broker.delayed.bucket;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
@@ -40,6 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.Position;
+import org.apache.pulsar.broker.delayed.MockBucketSnapshotStorage;
 import org.apache.pulsar.broker.service.persistent.AbstractPersistentDispatcherMultipleConsumers;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -64,7 +64,7 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
         dispatcher = mock(AbstractPersistentDispatcherMultipleConsumers.class);
         final ManagedCursor cursor = mock(ManagedCursor.class);
         timer = mock(Timer.class);
-        storage = mock(BucketSnapshotStorage.class);
+        storage = new MockBucketSnapshotStorage();
 
         when(dispatcher.getName()).thenReturn("persistent://public/default/test-topic / test-cursor");
         when(dispatcher.getCursor()).thenReturn(cursor);
@@ -75,18 +75,6 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
         when(cursor.putCursorProperty(any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(null));
         when(cursor.removeCursorProperty(any()))
-                .thenReturn(CompletableFuture.completedFuture(null));
-
-        // Mock storage operations to avoid NullPointerException
-        when(storage.createBucketSnapshot(any(), any(), any(), any(), any()))
-                .thenReturn(CompletableFuture.completedFuture(1L));
-        when(storage.getBucketSnapshotMetadata(anyLong()))
-                .thenReturn(CompletableFuture.completedFuture(null));
-        when(storage.getBucketSnapshotSegment(anyLong(), anyLong(), anyLong()))
-                .thenReturn(CompletableFuture.completedFuture(java.util.Collections.emptyList()));
-        when(storage.getBucketSnapshotLength(anyLong()))
-                .thenReturn(CompletableFuture.completedFuture(0L));
-        when(storage.deleteBucketSnapshot(anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         tracker = new BucketDelayedDeliveryTracker(
@@ -107,6 +95,9 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
         // Then close tracker safely after all threads stopped
         if (tracker != null) {
             tracker.close();
+        }
+        if (storage != null) {
+            storage.close();
         }
     }
 
@@ -622,20 +613,17 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
             executorService.submit(() -> {
                 try {
                     startLatch.await();
-                    int consecutiveEmptyReturns = 0;
-                    final int maxConsecutiveEmpty = 5;
+                    final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
 
                     while (totalMessagesRetrieved.get() < totalMessages
-                            && consecutiveEmptyReturns < maxConsecutiveEmpty) {
+                            && System.nanoTime() < deadlineNanos) {
                         NavigableSet<Position> messages = tracker.getScheduledMessages(50);
                         int retrieved = messages.size();
                         totalMessagesRetrieved.addAndGet(retrieved);
 
                         if (retrieved == 0) {
-                            consecutiveEmptyReturns++;
                             Thread.sleep(10);
                         } else {
-                            consecutiveEmptyReturns = 0;
                             Thread.sleep(5);
                         }
                     }
@@ -967,12 +955,12 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
                     writerDone.await();
                     Thread.sleep(1000); // Wait 1 second for messages to become ready for delivery
 
-                    int consecutiveEmptyReturns = 0;
-                    final int maxConsecutiveEmpty = 5;
+                    final long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
 
-                    // Continue until we've retrieved all deliverable messages or hit max empty returns
+                    // Continue until all deliverable messages are retrieved or the deadline is reached. Empty returns
+                    // are valid while a bucket snapshot or snapshot segment load is still completing.
                     while (totalMessagesRetrieved.get() < deliverableMessagesCount.get()
-                            && consecutiveEmptyReturns < maxConsecutiveEmpty) {
+                            && System.nanoTime() < deadlineNanos) {
                         try {
                             NavigableSet<Position> messages = tracker.getScheduledMessages(50);
                             int retrieved = messages.size();
@@ -980,10 +968,8 @@ public class BucketDelayedDeliveryTrackerThreadSafetyTest {
                             completedOperations.incrementAndGet();
 
                             if (retrieved == 0) {
-                                consecutiveEmptyReturns++;
                                 Thread.sleep(5); // Short wait for more messages
                             } else {
-                                consecutiveEmptyReturns = 0;
                                 Thread.sleep(2); // Short processing delay
                             }
 
