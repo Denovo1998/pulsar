@@ -53,7 +53,6 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
     private final boolean isDelayedDeliveryDeliverAtTimeStrict;
 
     private final Object triggerLock;
-
     // Guards the timer state (timeout, currentTimeoutTarget, lastTickRun) against concurrent access from
     // dispatcher threads (updateTimer/rescheduleTimer/close) and the timer thread (run). It is a leaf lock:
     // no subclass method is invoked while holding it.
@@ -119,10 +118,10 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
     /**
      * Update the delivery timer to fire when the next message in the tracker becomes due.
      *
-     * Callers are expected to serialize all tracker state mutations at the dispatcher or tracker level, so the
+     * Callers are expected to serialize all tracker state mutations (at the dispatcher or tracker level), so the
      * snapshot of {@link #getNumberOfDelayedMessages()} and {@link #nextDeliveryTime()} is taken before acquiring
-     * timeoutLock. This keeps timeoutLock a leaf lock that never calls into subclass methods, avoiding lock-ordering
-     * deadlocks with subclasses that synchronize those methods on the tracker instance.
+     * timeoutLock. This keeps timeoutLock a leaf lock that never calls into subclass methods, ruling out lock
+     * ordering deadlocks with subclasses that synchronize those methods on the tracker instance.
      */
     protected final void updateTimer() {
         long numberOfDelayedMessages = getNumberOfDelayedMessages();
@@ -151,8 +150,8 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
             timeout.cancel();
             timeout = null;
         }
-        // Reset the tracked state so a later updateTimer() cannot short-circuit on a stale target while no live
-        // timer remains. See #25996.
+        // Reset the tracked state so a subsequent updateTimer() call cannot short-circuit on a stale
+        // currentTimeoutTarget while no live timer remains. See #25996.
         currentTimeoutTarget = -1;
 
         long now = clock.millis();
@@ -171,9 +170,8 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
         // Compute the earliest time that we schedule the timer to run.
         long remainingTickDelayMillis = lastTickRun + tickTimeMillis - now;
         long calculatedDelayMillis = Math.max(delayMillis, remainingTickDelayMillis);
-
-        log.debug().attr("delayMillis", calculatedDelayMillis).log("Start timer");
-
+        log.debug().attr("delayMillis", calculatedDelayMillis)
+                .log("Start timer");
         // Even though we may delay longer than this timestamp because of the tick delay, we still track the
         // current timeout with reference to the next message's timestamp.
         currentTimeoutTarget = timestamp;
@@ -182,15 +180,17 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
 
     @Override
     public void run(Timeout triggeredTimeout) throws Exception {
-        log.debug().log("Timer triggered");
+        log.debug("Timer triggered");
+
         if (triggeredTimeout == null || triggeredTimeout.isCancelled()) {
             return;
         }
 
         synchronized (timeoutLock) {
             lastTickRun = clock.millis();
-            // A timeout that was superseded by updateTimer()/rescheduleTimer() may still fire if it passed its
-            // isCancelled() check before being cancelled. It must not clear the state of the newer timer.
+            // Only reset the timer state if the triggered timeout is the currently armed one. A timeout that
+            // was already superseded by updateTimer()/rescheduleTimer() may still fire if it passed its
+            // isCancelled() check before being cancelled; it must not clear the state of the newer timer.
             if (triggeredTimeout == this.timeout) {
                 currentTimeoutTarget = -1;
                 this.timeout = null;
@@ -203,7 +203,9 @@ public abstract class AbstractDelayedDeliveryTracker implements DelayedDeliveryT
     }
 
     /**
-     * Cancel the current timer, if any, and schedule this timer task to run after the given delay.
+     * Cancel the current timer (if any) and schedule the timer task to run after the given delay. Used by
+     * subclasses to trigger a dispatch round from asynchronous completions instead of mutating the timer
+     * state directly.
      */
     protected final void rescheduleTimer(long delayMillis) {
         synchronized (timeoutLock) {

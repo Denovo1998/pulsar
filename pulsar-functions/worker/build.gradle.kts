@@ -45,7 +45,7 @@ dependencies {
     implementation(project(":pulsar-functions:pulsar-functions-proto"))
     implementation(project(":pulsar-functions:pulsar-functions-secrets"))
     implementation(project(":pulsar-docs-tools")) {
-        exclude(group = "io.swagger")
+        exclude(group = "io.swagger.core.v3")
     }
     implementation(project(":pulsar-package-management:pulsar-package-core"))
 
@@ -73,8 +73,8 @@ dependencies {
 
     implementation(libs.jetty.server)
     implementation(libs.jetty.alpn.conscrypt.server)
-    implementation(libs.jetty.ee8.servlet)
-    implementation(libs.jetty.ee8.servlets)
+    implementation(libs.jetty.ee10.servlet)
+    implementation(libs.jetty.ee10.servlets)
 
     implementation(libs.jakarta.activation.api)
     implementation(libs.jakarta.ws.rs.api)
@@ -83,10 +83,7 @@ dependencies {
     implementation(libs.simpleclient.hotspot)
     implementation(libs.simpleclient.common)
 
-    compileOnly(libs.swagger.core) {
-        exclude(group = "com.fasterxml.jackson.core")
-        exclude(group = "com.fasterxml.jackson.dataformat")
-    }
+    compileOnly(libs.swagger.annotations)
 
     testImplementation(libs.protobuf.java.util)
     testImplementation(project(":pulsar-functions:pulsar-functions-api-examples"))
