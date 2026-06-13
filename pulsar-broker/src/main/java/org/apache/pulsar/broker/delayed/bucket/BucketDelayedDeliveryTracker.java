@@ -786,7 +786,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                 afterCreateImmutableBucket(immutableBucketDelayedIndexPair, createStartTime);
                 clearBucketBeingSealedUnsafe(bucketToSeal);
                 if (!sharedBucketPriorityQueue.isEmpty() && sharedBucketPriorityQueue.peekN1() <= getCutoffTime()) {
-                    scheduleImmediateRun();
+                    rescheduleTimer(0);
                 } else {
                     updateTimer();
                 }
@@ -1008,7 +1008,7 @@ public class BucketDelayedDeliveryTracker extends AbstractDelayedDeliveryTracker
                         stats.recordSuccessEvent(BucketDelayedMessageIndexStats.Type.load,
                                 System.currentTimeMillis() - loadStartTime);
                     }
-                    scheduleImmediateRun();
+                    rescheduleTimer(0);
                 });
     }
 

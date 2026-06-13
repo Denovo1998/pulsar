@@ -21,6 +21,8 @@ package org.apache.pulsar.broker.delayed;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -33,13 +35,16 @@ import io.netty.util.TimerTask;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.lang.reflect.Method;
 import java.time.Clock;
+import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import lombok.Cleanup;
 import org.apache.bookkeeper.mledger.Position;
+import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.pulsar.broker.service.persistent.AbstractPersistentDispatcherMultipleConsumers;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -78,8 +83,7 @@ public class InMemoryDeliveryTrackerTest extends AbstractDeliveryTrackerTest {
 
                     Timeout t = mock(Timeout.class);
                     when(t.cancel()).then(i -> {
-                        tasks.remove(scheduleAt, task);
-                        return null;
+                        return tasks.remove(scheduleAt, task);
                     });
                     return t;
                 });
@@ -114,6 +118,33 @@ public class InMemoryDeliveryTrackerTest extends AbstractDeliveryTrackerTest {
                     new InMemoryDelayedDeliveryTracker(dispatcher, timer, 8, clock,
                             true, 100)
             }};
+            case "testStrictModeNeverDeliversEarlyAndKeepsTimerArmed",
+                 "testStaleTimerTriggerDoesNotClearNewerTimer" -> {
+                Timer mockTimer = mock(Timer.class);
+                NavigableMap<Long, Map.Entry<TimerTask, Timeout>> tasks = new TreeMap<>();
+                when(mockTimer.newTimeout(any(), anyLong(), any())).then(invocation -> {
+                    TimerTask task = invocation.getArgument(0, TimerTask.class);
+                    long timeout = invocation.getArgument(1, Long.class);
+                    TimeUnit unit = invocation.getArgument(2, TimeUnit.class);
+                    long scheduleAt = clockTime.get() + unit.toMillis(timeout);
+                    Timeout t = mock(Timeout.class);
+                    Map.Entry<TimerTask, Timeout> entry = Map.entry(task, t);
+                    AtomicBoolean cancelled = new AtomicBoolean();
+                    when(t.cancel()).then(i -> {
+                        cancelled.set(true);
+                        return tasks.remove(scheduleAt, entry);
+                    });
+                    when(t.isCancelled()).then(i -> cancelled.get());
+                    tasks.put(scheduleAt, entry);
+                    return t;
+                });
+                yield new Object[][]{{
+                        new InMemoryDelayedDeliveryTracker(dispatcher, mockTimer, 1000, clock,
+                                true, 0),
+                        tasks,
+                        mockTimer
+                }};
+            }
             default -> new Object[][]{{
                     new InMemoryDelayedDeliveryTracker(dispatcher, timer, 1, clock,
                             true, 0)
@@ -229,7 +260,7 @@ public class InMemoryDeliveryTrackerTest extends AbstractDeliveryTrackerTest {
                 true, 0) {
             @Override
             public void run(Timeout timeout) throws Exception {
-                super.timeout = timer.newTimeout(this, 1, TimeUnit.MILLISECONDS);
+                rescheduleTimer(1);
                 if (timeout == null || timeout.isCancelled()) {
                     return;
                 }
@@ -250,6 +281,72 @@ public class InMemoryDeliveryTrackerTest extends AbstractDeliveryTrackerTest {
         tracker.close();
 
         assertNull(exceptions[0]);
+    }
+
+    @Test(dataProvider = "delayedTracker")
+    public void testStrictModeNeverDeliversEarlyAndKeepsTimerArmed(InMemoryDelayedDeliveryTracker tracker,
+            NavigableMap<Long, Map.Entry<TimerTask, Timeout>> tasks, Timer mockTimer) throws Exception {
+        clockTime.set(0);
+
+        assertTrue(tracker.addMessage(1, 1, 60400));
+        assertTrue(tracker.addMessage(2, 2, 61000));
+        assertEquals(tasks.size(), 1, "a delivery timer should be armed for the earliest message");
+        assertEquals(tasks.firstKey().longValue(), 60416, "the timer should target M1's rounded-up bucket");
+
+        clockTime.set(60000);
+        assertFalse(tracker.hasMessageAvailable());
+        assertTrue(tracker.getScheduledMessages(100).isEmpty(),
+                "strict mode must not deliver a message before its deliverAt time");
+        assertEquals(tasks.size(), 1, "the delivery timer must remain armed");
+
+        clockTime.set(60416);
+        Map.Entry<TimerTask, Timeout> firedTimeout = tasks.pollFirstEntry().getValue();
+        firedTimeout.getKey().run(firedTimeout.getValue());
+        Set<Position> scheduled = tracker.getScheduledMessages(100);
+        assertEquals(scheduled, Set.of(PositionFactory.create(1, 1)));
+
+        assertEquals(tracker.getNumberOfDelayedMessages(), 1);
+        assertFalse(tracker.hasMessageAvailable());
+        assertEquals(tasks.size(), 1, "a delivery timer must remain armed for the pending message M2");
+        assertEquals(tasks.firstKey().longValue(), 61440, "the timer should target M2's rounded-up bucket");
+
+        clockTime.set(61440);
+        firedTimeout = tasks.pollFirstEntry().getValue();
+        firedTimeout.getKey().run(firedTimeout.getValue());
+        scheduled = tracker.getScheduledMessages(100);
+        assertEquals(scheduled, Set.of(PositionFactory.create(2, 2)));
+        assertEquals(tracker.getNumberOfDelayedMessages(), 0);
+
+        tracker.close();
+    }
+
+    @Test(dataProvider = "delayedTracker")
+    public void testStaleTimerTriggerDoesNotClearNewerTimer(InMemoryDelayedDeliveryTracker tracker,
+            NavigableMap<Long, Map.Entry<TimerTask, Timeout>> tasks, Timer mockTimer) throws Exception {
+        clockTime.set(0);
+
+        assertTrue(tracker.addMessage(2, 2, 61000));
+        assertEquals(tasks.firstKey().longValue(), 61440);
+        assertTrue(tracker.addMessage(1, 1, 60400));
+        assertEquals(tasks.size(), 1);
+        assertEquals(tasks.firstKey().longValue(), 60416, "M1's timer should have replaced M2's");
+
+        Timeout staleTimeout = mock(Timeout.class);
+        tracker.run(staleTimeout);
+
+        assertFalse(tracker.hasMessageAvailable());
+        assertEquals(tasks.size(), 1);
+        assertEquals(tasks.firstKey().longValue(), 60416);
+        verify(mockTimer, times(2)).newTimeout(any(), anyLong(), any());
+
+        clockTime.set(60416);
+        Map.Entry<TimerTask, Timeout> firedTimeout = tasks.pollFirstEntry().getValue();
+        firedTimeout.getKey().run(firedTimeout.getValue());
+        Set<Position> scheduled = tracker.getScheduledMessages(100);
+        assertEquals(scheduled, Set.of(PositionFactory.create(1, 1)));
+        assertEquals(tasks.size(), 1, "a delivery timer must be re-armed for the still pending M2");
+
+        tracker.close();
     }
 
     @Test(dataProvider = "delayedTracker")
@@ -283,5 +380,41 @@ public class InMemoryDeliveryTrackerTest extends AbstractDeliveryTrackerTest {
         clockTime.set(60);
 
         tracker.getScheduledMessages(10);
+    }
+
+    @Test(dataProvider = "delayedTracker")
+    public void testGetScheduledMessagesWithMaxMessagesSmallerThanBucket(InMemoryDelayedDeliveryTracker tracker)
+            throws Exception {
+        clockTime.set(0);
+
+        assertTrue(tracker.addMessage(1, 0, 10));
+        assertTrue(tracker.addMessage(1, 1, 10));
+        for (int entryId = 0; entryId < 5; entryId++) {
+            assertTrue(tracker.addMessage(2, entryId, 10));
+        }
+        assertEquals(tracker.getNumberOfDelayedMessages(), 7);
+
+        clockTime.set(10);
+
+        Set<Position> scheduled = tracker.getScheduledMessages(4);
+        assertEquals(scheduled, Set.of(
+                PositionFactory.create(1, 0),
+                PositionFactory.create(1, 1),
+                PositionFactory.create(2, 0),
+                PositionFactory.create(2, 1)));
+        assertEquals(tracker.getNumberOfDelayedMessages(), 3);
+
+        scheduled = tracker.getScheduledMessages(2);
+        assertEquals(scheduled, Set.of(
+                PositionFactory.create(2, 2),
+                PositionFactory.create(2, 3)));
+        assertEquals(tracker.getNumberOfDelayedMessages(), 1);
+
+        scheduled = tracker.getScheduledMessages(10);
+        assertEquals(scheduled, Set.of(PositionFactory.create(2, 4)));
+        assertEquals(tracker.getNumberOfDelayedMessages(), 0);
+        assertFalse(tracker.hasMessageAvailable());
+
+        tracker.close();
     }
 }

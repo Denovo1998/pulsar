@@ -63,6 +63,7 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
 
     // The bit count to trim to reduce memory occupation.
     private final int timestampPrecisionBitCnt;
+    private final long precisionMillis;
 
     // Count of delayed messages in the tracker.
     private final AtomicLong delayedMessagesCount = new AtomicLong(0);
@@ -108,6 +109,7 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
         this.log = LOG.with().ctx(super.log).build();
         this.fixedDelayDetectionLookahead = fixedDelayDetectionLookahead;
         this.timestampPrecisionBitCnt = calculateTimestampPrecisionBitCnt(tickTimeMillis);
+        this.precisionMillis = 1L << timestampPrecisionBitCnt;
     }
 
     /**
@@ -151,7 +153,7 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
                 .attr("deliveryInMs", deliverAt - clock.millis())
                 .log("Add message");
 
-        long timestamp = trimLowerBit(deliverAt, timestampPrecisionBitCnt);
+        long timestamp = roundTimestamp(deliverAt);
 
         Roaring64Bitmap bitmap = delayedMessageMap.computeIfAbsent(timestamp, k -> new TreeMap<>())
             .computeIfAbsent(ledgerId, k -> new Roaring64Bitmap());
@@ -160,7 +162,7 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
         boolean isNew = !bitmap.contains(entryId);
 
         if (isNew) {
-            bitmap.add(entryId);
+            bitmap.addLong(entryId);
             delayedMessagesCount.incrementAndGet();
         }
 
@@ -169,6 +171,26 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
         checkAndUpdateHighest(deliverAt);
 
         return true;
+    }
+
+    /**
+     * Round the deliverAt timestamp to the bucket boundary used as the key in {@link #delayedMessageMap}, so that
+     * all messages within the same bucket share a single map entry to reduce memory usage.
+     *
+     * In strict delivery mode the timestamp is rounded up: a bucket becomes due only after every deliverAt time
+     * inside it has passed, so messages are delivered up to one bucket late, but never before deliverAt. Rounding
+     * down would let {@link #getScheduledMessages(int)} hand a message to the dispatcher too early; the dispatcher
+     * would put it back and re-trigger reads in a loop until deliverAt is reached. See #25996.
+     *
+     * In non-strict mode the timestamp is rounded down, since delivering up to tickTimeMillis early is allowed.
+     */
+    private long roundTimestamp(long deliverAt) {
+        if (isDeliverAtTimeStrict()) {
+            // Round up, saturating at Long.MAX_VALUE instead of overflowing for deliverAt close to Long.MAX_VALUE.
+            long roundedUp = deliverAt + precisionMillis - 1;
+            return trimLowerBit(roundedUp < deliverAt ? Long.MAX_VALUE : roundedUp, timestampPrecisionBitCnt);
+        }
+        return trimLowerBit(deliverAt, timestampPrecisionBitCnt);
     }
 
     /**
@@ -216,20 +238,22 @@ public class InMemoryDelayedDeliveryTracker extends AbstractDelayedDeliveryTrack
             for (var ledgerEntry : ledgerMap.entrySet()) {
                 long ledgerId = ledgerEntry.getKey();
                 Roaring64Bitmap entryIds = ledgerEntry.getValue();
-                int cardinality = (int) entryIds.getLongCardinality();
+                long cardinality = entryIds.getLongCardinality();
                 if (cardinality <= n) {
+                    int cardinalityInt = (int) cardinality;
                     entryIds.forEach(entryId -> {
                         positions.add(PositionFactory.create(ledgerId, entryId));
                     });
-                    n -= cardinality;
-                    delayedMessagesCount.addAndGet(-cardinality);
+                    n -= cardinalityInt;
+                    delayedMessagesCount.addAndGet(-cardinalityInt);
                     ledgerIdToDelete.add(ledgerId);
                 } else {
-                    long[] entryIdsArray = entryIds.toArray();
-                    for (int i = 0; i < n; i++) {
-                        positions.add(PositionFactory.create(ledgerId, entryIdsArray[i]));
-                        entryIds.removeLong(entryIdsArray[i]);
-                    }
+                    Roaring64Bitmap entryIdsToRemove = new Roaring64Bitmap();
+                    entryIds.stream().limit(n).forEach(entryId -> {
+                        positions.add(PositionFactory.create(ledgerId, entryId));
+                        entryIdsToRemove.addLong(entryId);
+                    });
+                    entryIds.andNot(entryIdsToRemove);
                     delayedMessagesCount.addAndGet(-n);
                     n = 0;
                 }
