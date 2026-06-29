@@ -256,7 +256,23 @@ public class GeoPersistentReplicator extends PersistentReplicator {
 
                 headersAndPayload.retain();
 
-                CompletableFuture<SchemaInfo> schemaFuture = getSchemaInfo(msg);
+                CompletableFuture<SchemaInfo> schemaFuture;
+                try {
+                    schemaFuture = getSchemaInfo(msg);
+                } catch (Exception e) {
+                    log.warn()
+                            .attr("position", entry.getPosition())
+                            .exception(e)
+                            .log("Failed to get schema from local cluster, will try in the next loop");
+                    beforeTerminateOrCursorRewinding(ReasonOfWaitForCursorRewinding.Fetching_Schema);
+                    inFlightTask.incCompletedEntries();
+                    entry.release();
+                    headersAndPayload.release();
+                    msg.recycle();
+                    skipRemainingMessages = true;
+                    doRewindCursor(false);
+                    continue;
+                }
                 if (!schemaFuture.isDone() || schemaFuture.isCompletedExceptionally()) {
                     /**
                      * Skip in flight reading tasks.
