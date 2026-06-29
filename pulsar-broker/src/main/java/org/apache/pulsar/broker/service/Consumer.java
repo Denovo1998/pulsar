@@ -136,6 +136,10 @@ public class Consumer {
             AtomicIntegerFieldUpdater.newUpdater(Consumer.class, "unackedMessages");
     private volatile int unackedMessages = 0;
     private volatile boolean blockedConsumerOnUnackedMsgs = false;
+    private static final AtomicIntegerFieldUpdater<Consumer> TOPIC_MIGRATION_SENT_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(Consumer.class, "topicMigrationSent");
+    @SuppressWarnings("unused")
+    private volatile int topicMigrationSent = 0;
 
     private final Map<String, String> metadata;
 
@@ -971,7 +975,7 @@ public class Consumer {
     }
 
     public void topicMigrated(Optional<ClusterUrl> clusterUrl) {
-        if (clusterUrl.isPresent()) {
+        if (clusterUrl.isPresent() && TOPIC_MIGRATION_SENT_UPDATER.compareAndSet(this, 0, 1)) {
             ClusterUrl url = clusterUrl.get();
             cnx.getCommandSender().sendTopicMigrated(ResourceType.Consumer, consumerId, url.getBrokerServiceUrl(),
                     url.getBrokerServiceUrlTls());

@@ -216,6 +216,72 @@ public class NonPersistentTopicTest extends BrokerTestBase {
     }
 
     @Test
+    public void testPostSubscribeMigrationCheckDoesNotDoubleCloseRedirectedConsumer() throws Exception {
+        final String topicName = "non-persistent://prop/ns-abc/migration-double-close-" + UUID.randomUUID();
+        final String subName = "migration-sub";
+
+        @Cleanup
+        Producer<byte[]> producer = pulsarClient.newProducer().topic(topicName).create();
+        NonPersistentTopic realTopic =
+                (NonPersistentTopic) pulsar.getBrokerService().getTopicReference(topicName).get();
+
+        ClusterUrl migratedUrl = new ClusterUrl("http://migrated:8080", "https://migrated:8443",
+                "pulsar://migrated:6650", "pulsar+ssl://migrated:6651");
+        admin.clusters().updateClusterMigration(conf.getClusterName(), true, migratedUrl);
+        Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() ->
+                AbstractTopic.getMigratedClusterUrlAsync(pulsar, topicName).get().isPresent());
+
+        NonPersistentTopic spyTopic = Mockito.spy(realTopic);
+        Mockito.doReturn(true).when(spyTopic).isMigrated();
+
+        NonPersistentSubscription spySubscription =
+                Mockito.spy(new NonPersistentSubscription(spyTopic, subName, Collections.emptyMap()));
+        spyTopic.getSubscriptions().put(subName, spySubscription);
+
+        PulsarCommandSender commandSender = Mockito.mock(PulsarCommandSender.class);
+        TransportCnx cnx = Mockito.mock(TransportCnx.class);
+        Mockito.doReturn(true).when(cnx).isActive();
+        Mockito.doReturn(true).when(cnx).isBatchMessageCompatibleVersion();
+        Mockito.doReturn("test-role").when(cnx).getAuthRole();
+        Mockito.doReturn(pulsar.getBrokerService()).when(cnx).getBrokerService();
+        Mockito.doReturn(commandSender).when(cnx).getCommandSender();
+
+        SubscriptionOption option = SubscriptionOption.builder()
+                .cnx(cnx)
+                .subscriptionName(subName)
+                .consumerId(1L)
+                .subType(CommandSubscribe.SubType.Shared)
+                .priorityLevel(0)
+                .consumerName("consumer-1")
+                .isDurable(false)
+                .startMessageId(null)
+                .metadata(Collections.emptyMap())
+                .readCompacted(false)
+                .initialPosition(CommandSubscribe.InitialPosition.Latest)
+                .startMessageRollbackDurationSec(0)
+                .replicatedSubscriptionStateArg(false)
+                .keySharedMeta(null)
+                .subscriptionProperties(Optional.empty())
+                .build();
+
+        long usageBefore = spyTopic.currentUsageCount();
+
+        org.apache.pulsar.broker.service.Consumer consumer =
+                spyTopic.subscribe(option).get(10, TimeUnit.SECONDS);
+        assertNotNull(consumer);
+        assertEquals(spyTopic.currentUsageCount(), usageBefore);
+
+        // Simulate ServerCnx.handleSubscribe's generic post-subscribe migration check. The consumer was already
+        // redirected and closed by NonPersistentTopic.internalSubscribe, so this second check must be idempotent.
+        consumer.checkAndApplyTopicMigrationAsync().get(10, TimeUnit.SECONDS);
+
+        Mockito.verify(commandSender).sendTopicMigrated(Mockito.any(), Mockito.eq(1L),
+                Mockito.eq(migratedUrl.getBrokerServiceUrl()), Mockito.eq(migratedUrl.getBrokerServiceUrlTls()));
+        assertEquals(spyTopic.currentUsageCount(), usageBefore,
+                "The post-subscribe migration check must not close the redirected consumer a second time");
+    }
+
+    @Test
     public void testSubscriptionsOnNonPersistentTopic() throws Exception {
         final String topicName = "non-persistent://prop/ns-abc/topic_" + UUID.randomUUID();
         final String exclusiveSubName = "exclusive";
