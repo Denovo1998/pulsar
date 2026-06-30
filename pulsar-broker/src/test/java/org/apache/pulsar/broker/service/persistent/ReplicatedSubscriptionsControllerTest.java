@@ -53,6 +53,7 @@ import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.Replicator;
 import org.apache.pulsar.broker.stats.OpenTelemetryReplicatedSubscriptionStats;
 import org.apache.pulsar.common.api.proto.CommandAck.AckType;
+import org.apache.pulsar.common.api.proto.CommandSubscribe.InitialPosition;
 import org.apache.pulsar.common.api.proto.MarkerType;
 import org.apache.pulsar.common.api.proto.MarkersMessageIdData;
 import org.apache.pulsar.common.policies.data.BacklogQuota;
@@ -104,6 +105,55 @@ public class ReplicatedSubscriptionsControllerTest {
 
             assertThat(ackFuture.isObserved())
                     .as("replicated subscription update ack failures should not be dropped")
+                    .isTrue();
+        } finally {
+            marker.release();
+            controller.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testReplicatedSubscriptionUpdateCreatedSubscriptionAckFutureIsObserved() throws Exception {
+        PulsarService pulsar = mock(PulsarService.class);
+        ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
+        @SuppressWarnings("rawtypes")
+        ScheduledFuture timer = mock(ScheduledFuture.class);
+        ServiceConfiguration config = new ServiceConfiguration();
+        config.setEnableReplicatedSubscriptions(true);
+        OpenTelemetryReplicatedSubscriptionStats stats = mock(OpenTelemetryReplicatedSubscriptionStats.class);
+        BrokerService brokerService = mock(BrokerService.class);
+        PersistentTopic topic = mock(PersistentTopic.class);
+        PersistentSubscription createdSubscription = mock(PersistentSubscription.class);
+        ObservableFuture<Void> ackFuture = new ObservableFuture<>();
+
+        when(brokerService.pulsar()).thenReturn(pulsar);
+        when(brokerService.getPulsar()).thenReturn(pulsar);
+        when(pulsar.getExecutor()).thenReturn(executor);
+        when(pulsar.getConfiguration()).thenReturn(config);
+        when(pulsar.getOpenTelemetryReplicatedSubscriptionStats()).thenReturn(stats);
+        when(executor.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class)))
+                .thenReturn(timer);
+
+        when(topic.getName()).thenReturn("persistent://public/default/t1");
+        when(topic.getBrokerService()).thenReturn(brokerService);
+        when(topic.getSubscription("sub")).thenReturn(null);
+        when(topic.createSubscription(eq("sub"), eq(InitialPosition.Earliest), eq(true), any()))
+                .thenReturn(CompletableFuture.completedFuture(createdSubscription));
+        when(createdSubscription.acknowledgeMessageAsync(any(), eq(AckType.Cumulative), any())).thenReturn(ackFuture);
+
+        ReplicatedSubscriptionsController controller = new ReplicatedSubscriptionsController(topic, "local");
+        ByteBuf marker = Markers.newReplicatedSubscriptionsUpdate("sub",
+                Map.of("local", new MarkersMessageIdData().setLedgerId(1).setEntryId(2)));
+        try {
+            Commands.skipMessageMetadata(marker);
+
+            controller.receivedReplicatedSubscriptionMarker(PositionFactory.create(3, 4),
+                    MarkerType.REPLICATED_SUBSCRIPTION_UPDATE_VALUE, marker);
+
+            verify(topic).createSubscription(eq("sub"), eq(InitialPosition.Earliest), eq(true), any());
+            assertThat(ackFuture.isObserved())
+                    .as("replicated subscription update ack failures should be observed after subscription creation")
                     .isTrue();
         } finally {
             marker.release();
