@@ -21,15 +21,21 @@ package org.apache.pulsar.broker.service.persistent;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.EventLoopGroup;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.Position;
@@ -54,12 +60,46 @@ import org.testng.annotations.Test;
 public class GeoPersistentReplicatorTest {
 
     @Test
-    public void testSchemaInfoSynchronousFailureCompletesCurrentEntry() throws Exception {
+    public void testSchemaInfoSynchronousFailureReleasesBatchAndSchedulesCursorRewind() throws Exception {
         ThrowingSchemaReplicator replicator = new ThrowingSchemaReplicator();
         replicator.forceStarted();
 
-        Position position = PositionFactory.create(1, 2);
+        Position firstPosition = PositionFactory.create(1, 2);
         ByteBuf headersAndPayload = newMessageWithSchemaVersion();
+        Entry firstEntry = newEntry(firstPosition, headersAndPayload);
+        Entry secondEntry = mock(Entry.class);
+
+        List<Entry> entries = List.of(firstEntry, secondEntry);
+        InFlightTask inFlightTask = new InFlightTask(firstPosition, entries.size(), replicator.getReplicatorId());
+        inFlightTask.setEntries(entries);
+
+        try {
+            assertThat(replicator.replicateEntries(entries, inFlightTask)).isFalse();
+
+            assertThat(inFlightTask.getCompletedEntries())
+                    .as("the failed entry and skipped remaining entries should release their in-flight permits")
+                    .isEqualTo(entries.size());
+            verify(firstEntry).release();
+            verify(secondEntry).release();
+            verify(replicator.cursor, never()).rewind();
+            verify(replicator.context.executor).schedule(any(Runnable.class),
+                    eq((long) PersistentTopic.MESSAGE_RATE_BACKOFF_MS), eq(TimeUnit.MILLISECONDS));
+
+            Runnable scheduledRewind = replicator.context.scheduledTask.get();
+            assertThat(scheduledRewind).isNotNull();
+            assertThat(replicator.readMoreEntriesCalls).isZero();
+
+            scheduledRewind.run();
+            verify(replicator.cursor).rewind();
+            assertThat(replicator.readMoreEntriesCalls).isEqualTo(1);
+        } finally {
+            while (headersAndPayload.refCnt() > 0) {
+                headersAndPayload.release();
+            }
+        }
+    }
+
+    private static Entry newEntry(Position position, ByteBuf headersAndPayload) {
         Entry entry = mock(Entry.class);
         when(entry.getLength()).thenReturn(headersAndPayload.readableBytes());
         when(entry.getDataBuffer()).thenReturn(headersAndPayload);
@@ -70,23 +110,7 @@ public class GeoPersistentReplicatorTest {
             headersAndPayload.release();
             return null;
         }).when(entry).release();
-
-        List<Entry> entries = List.of(entry);
-        InFlightTask inFlightTask = new InFlightTask(position, 1, replicator.getReplicatorId());
-        inFlightTask.setEntries(entries);
-
-        try {
-            assertThat(replicator.replicateEntries(entries, inFlightTask)).isFalse();
-
-            assertThat(inFlightTask.getCompletedEntries())
-                    .as("the failed entry should release its in-flight permit")
-                    .isEqualTo(1);
-            verify(entry).release();
-        } finally {
-            while (headersAndPayload.refCnt() > 0) {
-                headersAndPayload.release();
-            }
-        }
+        return entry;
     }
 
     private static ByteBuf newMessageWithSchemaVersion() {
@@ -105,17 +129,18 @@ public class GeoPersistentReplicatorTest {
 
     private static class ThrowingSchemaReplicator extends GeoPersistentReplicator {
 
-        @SuppressWarnings("unchecked")
+        private final ReplicatorContext context;
+        private int readMoreEntriesCalls;
+
         ThrowingSchemaReplicator() throws PulsarServerException {
-            this(mockTopic(), mockCursor(), "local", "remote",
-                    mockBrokerService(), mockReplicationClient(), mock(PulsarAdmin.class));
+            this(new ReplicatorContext());
         }
 
-        private ThrowingSchemaReplicator(PersistentTopic topic, ManagedCursor cursor, String localCluster,
-                                         String remoteCluster, BrokerService brokerService,
-                                         PulsarClientImpl replicationClient, PulsarAdmin replicationAdmin)
+        private ThrowingSchemaReplicator(ReplicatorContext context)
                 throws PulsarServerException {
-            super(topic, cursor, localCluster, remoteCluster, brokerService, replicationClient, replicationAdmin);
+            super(context.topic, context.cursor, "local", "remote", context.brokerService,
+                    context.replicationClient, context.replicationAdmin);
+            this.context = context;
         }
 
         @Override
@@ -128,14 +153,18 @@ public class GeoPersistentReplicatorTest {
             throw new ExecutionException(new RuntimeException("injected schema provider failure"));
         }
 
+        @Override
+        protected void readMoreEntries() {
+            readMoreEntriesCalls++;
+        }
+
         void forceStarted() {
             STATE_UPDATER.set(this, State.Started);
             this.producer = mock(ProducerImpl.class);
         }
 
-        private static PersistentTopic mockTopic() throws PulsarServerException {
+        private static PersistentTopic mockTopic(BrokerService brokerService) {
             PersistentTopic topic = mock(PersistentTopic.class);
-            BrokerService brokerService = mockBrokerService();
             when(topic.getName()).thenReturn("persistent://public/default/t1");
             when(topic.getBrokerService()).thenReturn(brokerService);
             when(topic.getReplicatorPrefix()).thenReturn("pulsar.repl");
@@ -149,7 +178,9 @@ public class GeoPersistentReplicatorTest {
             return cursor;
         }
 
-        private static BrokerService mockBrokerService() throws PulsarServerException {
+        private static BrokerService mockBrokerService(EventLoopGroup executor,
+                                                       AtomicReference<Runnable> scheduledTask)
+                throws PulsarServerException {
             ServiceConfiguration config = new ServiceConfiguration();
             PulsarService pulsar = mock(PulsarService.class);
             BrokerService brokerService = mock(BrokerService.class);
@@ -162,6 +193,11 @@ public class GeoPersistentReplicatorTest {
             when(pulsar.getAdminClient()).thenReturn(admin);
             when(brokerService.pulsar()).thenReturn(pulsar);
             when(brokerService.getPulsar()).thenReturn(pulsar);
+            when(brokerService.executor()).thenReturn(executor);
+            doAnswer(invocation -> {
+                scheduledTask.set(invocation.getArgument(0, Runnable.class));
+                return null;
+            }).when(executor).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
             return brokerService;
         }
 
@@ -171,6 +207,26 @@ public class GeoPersistentReplicatorTest {
             ProducerBuilder<byte[]> producerBuilder = mock(ProducerBuilder.class, RETURNS_SELF);
             when(replicationClient.newProducer(any(Schema.class))).thenReturn(producerBuilder);
             return replicationClient;
+        }
+    }
+
+    private static class ReplicatorContext {
+        private final AtomicReference<Runnable> scheduledTask;
+        private final EventLoopGroup executor;
+        private final BrokerService brokerService;
+        private final PersistentTopic topic;
+        private final ManagedCursor cursor;
+        private final PulsarClientImpl replicationClient;
+        private final PulsarAdmin replicationAdmin;
+
+        private ReplicatorContext() throws PulsarServerException {
+            this.scheduledTask = new AtomicReference<>();
+            this.executor = mock(EventLoopGroup.class);
+            this.brokerService = ThrowingSchemaReplicator.mockBrokerService(executor, scheduledTask);
+            this.topic = ThrowingSchemaReplicator.mockTopic(brokerService);
+            this.cursor = ThrowingSchemaReplicator.mockCursor();
+            this.replicationClient = ThrowingSchemaReplicator.mockReplicationClient();
+            this.replicationAdmin = mock(PulsarAdmin.class);
         }
     }
 }
