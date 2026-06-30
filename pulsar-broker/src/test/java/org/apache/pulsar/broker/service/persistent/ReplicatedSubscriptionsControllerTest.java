@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import io.netty.buffer.ByteBuf;
@@ -39,6 +40,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import lombok.Cleanup;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.DeleteCursorCallback;
@@ -130,6 +132,70 @@ public class ReplicatedSubscriptionsControllerTest {
             if (snapshotId != null && controller.pendingSnapshots().containsKey(snapshotId)) {
                 controller.snapshotCompleted(snapshotId);
             }
+            controller.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testTimeoutCleanupDoesNotRecordTimeoutWhenSnapshotCompletedConcurrently() {
+        PulsarService pulsar = mock(PulsarService.class);
+        ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
+        @SuppressWarnings("rawtypes")
+        ScheduledFuture timer = mock(ScheduledFuture.class);
+        ServiceConfiguration config = new ServiceConfiguration();
+        config.setReplicatedSubscriptionsSnapshotFrequencyMillis(60_000);
+        config.setReplicatedSubscriptionsSnapshotTimeoutSeconds(3);
+        OpenTelemetryReplicatedSubscriptionStats stats = mock(OpenTelemetryReplicatedSubscriptionStats.class);
+        BrokerService brokerService = mock(BrokerService.class);
+        PersistentTopic topic = mock(PersistentTopic.class);
+        Replicator replicator = mock(Replicator.class);
+        AtomicReference<Runnable> scheduledSnapshotTask = new AtomicReference<>();
+
+        when(topic.getName()).thenReturn("persistent://public/default/t1");
+        when(topic.getBrokerService()).thenReturn(brokerService);
+        when(topic.getLastMaxReadPositionMovedForwardTimestamp()).thenReturn(1L, 1L, 0L, 0L);
+        when(topic.getReplicators()).thenReturn(Map.of("remote", replicator));
+        when(replicator.isConnected()).thenReturn(true);
+        when(brokerService.pulsar()).thenReturn(pulsar);
+        when(pulsar.getExecutor()).thenReturn(executor);
+        when(pulsar.getConfiguration()).thenReturn(config);
+        when(pulsar.getOpenTelemetryReplicatedSubscriptionStats()).thenReturn(stats);
+        when(executor.scheduleAtFixedRate(any(Runnable.class), anyLong(), anyLong(), any(TimeUnit.class)))
+                .thenAnswer(invocation -> {
+                    scheduledSnapshotTask.set(invocation.getArgument(0, Runnable.class));
+                    return timer;
+                });
+
+        ReplicatedSubscriptionsController controller = new ReplicatedSubscriptionsController(topic, "local");
+        try {
+            Assert.assertNotNull(scheduledSnapshotTask.get());
+            scheduledSnapshotTask.get().run();
+            Assert.assertEquals(controller.pendingSnapshots().size(), 1);
+            String snapshotId = controller.pendingSnapshots().keySet().iterator().next();
+            ReplicatedSubscriptionsSnapshotBuilder originalBuilder = controller.pendingSnapshots().get(snapshotId);
+
+            AtomicBoolean completedDuringTimeoutCheck = new AtomicBoolean();
+            ReplicatedSubscriptionsSnapshotBuilder completedBuilder =
+                    new ReplicatedSubscriptionsSnapshotBuilder(controller, Set.of("remote"), config,
+                            Clock.systemUTC()) {
+                        @Override
+                        boolean isTimedOut() {
+                            if (completedDuringTimeoutCheck.compareAndSet(false, true)) {
+                                controller.snapshotCompleted(snapshotId);
+                            }
+                            return true;
+                        }
+                    };
+            Assert.assertTrue(controller.pendingSnapshots().replace(snapshotId, originalBuilder, completedBuilder));
+
+            scheduledSnapshotTask.get().run();
+
+            Assert.assertTrue(completedDuringTimeoutCheck.get());
+            Assert.assertFalse(controller.pendingSnapshots().containsKey(snapshotId));
+            verify(stats).recordSnapshotCompleted(anyLong());
+            verify(stats, never()).recordSnapshotTimedOut(anyLong());
+        } finally {
             controller.close();
         }
     }
