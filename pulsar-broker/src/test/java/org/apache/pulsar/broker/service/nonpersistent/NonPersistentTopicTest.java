@@ -138,8 +138,8 @@ public class NonPersistentTopicTest extends BrokerTestBase {
      * {@code addConsumerToSubscription}, and the consumer must NOT be attached to the subscription on the
      * old cluster. The previous code ran {@code getMigratedClusterUrlAsync().thenAccept(consumer::topicMigrated)}
      * concurrently with {@code addConsumerToSubscription}, so the consumer could be added before the redirect
-     * and disconnect ran. The fix sequences the check through {@link org.apache.pulsar.broker.service.Consumer
-     * #checkAndApplyTopicMigrationAsync()} and skips the add when migrated.
+     * and disconnect ran. The fix sequences a pure migration check before {@code addConsumerToSubscription} and
+     * lets the common {@code ServerCnx} post-subscribe path apply the redirect when migrated.
      */
     @Test
     public void testSubscribeOnMigratedTopicSkipsAddingConsumer() throws Exception {
@@ -202,83 +202,24 @@ public class NonPersistentTopicTest extends BrokerTestBase {
                 spyTopic.subscribe(option).get(10, TimeUnit.SECONDS);
         assertNotNull(consumer);
 
-        // The migration redirect must have been sent to the client.
-        Mockito.verify(commandSender).sendTopicMigrated(Mockito.any(), Mockito.eq(1L),
-                Mockito.eq(migratedUrl.getBrokerServiceUrl()), Mockito.eq(migratedUrl.getBrokerServiceUrlTls()));
-
         // The core regression assertion: a migrated topic must never attach the consumer to the
         // subscription. The buggy code added it before the async redirect/disconnect could run.
         Mockito.verify(spySubscription, Mockito.never()).addConsumer(Mockito.any());
         assertTrue(spySubscription.getConsumers().isEmpty());
 
-        // No usage-count leak: handleConsumerAdded's increment is balanced by the disconnect's removeConsumer.
-        assertEquals(spyTopic.currentUsageCount(), usageBefore);
-    }
+        // NonPersistentTopic only checks migration and skips addConsumerToSubscription. The common ServerCnx
+        // post-subscribe check remains responsible for sending the redirect and closing the consumer.
+        Mockito.verify(commandSender, Mockito.never()).sendTopicMigrated(Mockito.any(), Mockito.eq(1L),
+                Mockito.any(), Mockito.any());
+        assertEquals(spyTopic.currentUsageCount(), usageBefore + 1);
 
-    @Test
-    public void testPostSubscribeMigrationCheckDoesNotDoubleCloseRedirectedConsumer() throws Exception {
-        final String topicName = "non-persistent://prop/ns-abc/migration-double-close-" + UUID.randomUUID();
-        final String subName = "migration-sub";
-
-        @Cleanup
-        Producer<byte[]> producer = pulsarClient.newProducer().topic(topicName).create();
-        NonPersistentTopic realTopic =
-                (NonPersistentTopic) pulsar.getBrokerService().getTopicReference(topicName).get();
-
-        ClusterUrl migratedUrl = new ClusterUrl("http://migrated:8080", "https://migrated:8443",
-                "pulsar://migrated:6650", "pulsar+ssl://migrated:6651");
-        admin.clusters().updateClusterMigration(conf.getClusterName(), true, migratedUrl);
-        Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() ->
-                AbstractTopic.getMigratedClusterUrlAsync(pulsar, topicName).get().isPresent());
-
-        NonPersistentTopic spyTopic = Mockito.spy(realTopic);
-        Mockito.doReturn(true).when(spyTopic).isMigrated();
-
-        NonPersistentSubscription spySubscription =
-                Mockito.spy(new NonPersistentSubscription(spyTopic, subName, Collections.emptyMap()));
-        spyTopic.getSubscriptions().put(subName, spySubscription);
-
-        PulsarCommandSender commandSender = Mockito.mock(PulsarCommandSender.class);
-        TransportCnx cnx = Mockito.mock(TransportCnx.class);
-        Mockito.doReturn(true).when(cnx).isActive();
-        Mockito.doReturn(true).when(cnx).isBatchMessageCompatibleVersion();
-        Mockito.doReturn("test-role").when(cnx).getAuthRole();
-        Mockito.doReturn(pulsar.getBrokerService()).when(cnx).getBrokerService();
-        Mockito.doReturn(commandSender).when(cnx).getCommandSender();
-
-        SubscriptionOption option = SubscriptionOption.builder()
-                .cnx(cnx)
-                .subscriptionName(subName)
-                .consumerId(1L)
-                .subType(CommandSubscribe.SubType.Shared)
-                .priorityLevel(0)
-                .consumerName("consumer-1")
-                .isDurable(false)
-                .startMessageId(null)
-                .metadata(Collections.emptyMap())
-                .readCompacted(false)
-                .initialPosition(CommandSubscribe.InitialPosition.Latest)
-                .startMessageRollbackDurationSec(0)
-                .replicatedSubscriptionStateArg(false)
-                .keySharedMeta(null)
-                .subscriptionProperties(Optional.empty())
-                .build();
-
-        long usageBefore = spyTopic.currentUsageCount();
-
-        org.apache.pulsar.broker.service.Consumer consumer =
-                spyTopic.subscribe(option).get(10, TimeUnit.SECONDS);
-        assertNotNull(consumer);
-        assertEquals(spyTopic.currentUsageCount(), usageBefore);
-
-        // Simulate ServerCnx.handleSubscribe's generic post-subscribe migration check. The consumer was already
-        // redirected and closed by NonPersistentTopic.internalSubscribe, so this second check must be idempotent.
+        // Simulate ServerCnx.handleSubscribe's generic post-subscribe migration check.
         consumer.checkAndApplyTopicMigrationAsync().get(10, TimeUnit.SECONDS);
 
         Mockito.verify(commandSender).sendTopicMigrated(Mockito.any(), Mockito.eq(1L),
                 Mockito.eq(migratedUrl.getBrokerServiceUrl()), Mockito.eq(migratedUrl.getBrokerServiceUrlTls()));
         assertEquals(spyTopic.currentUsageCount(), usageBefore,
-                "The post-subscribe migration check must not close the redirected consumer a second time");
+                "The post-subscribe migration check must close the skipped consumer and balance usage count");
     }
 
     @Test
