@@ -60,7 +60,7 @@ import org.testng.annotations.Test;
 public class GeoPersistentReplicatorTest {
 
     @Test
-    public void testSchemaInfoSynchronousFailureReleasesBatchAndSchedulesCursorRewind() throws Exception {
+    public void testSchemaInfoSynchronousFailureSkipsOuterReadUntilScheduledCursorRewind() throws Exception {
         ThrowingSchemaReplicator replicator = new ThrowingSchemaReplicator();
         replicator.forceStarted();
 
@@ -71,10 +71,9 @@ public class GeoPersistentReplicatorTest {
 
         List<Entry> entries = List.of(firstEntry, secondEntry);
         InFlightTask inFlightTask = new InFlightTask(firstPosition, entries.size(), replicator.getReplicatorId());
-        inFlightTask.setEntries(entries);
 
         try {
-            assertThat(replicator.replicateEntries(entries, inFlightTask)).isFalse();
+            replicator.readEntriesComplete(entries, inFlightTask);
 
             assertThat(inFlightTask.getCompletedEntries())
                     .as("the failed entry and skipped remaining entries should release their in-flight permits")
