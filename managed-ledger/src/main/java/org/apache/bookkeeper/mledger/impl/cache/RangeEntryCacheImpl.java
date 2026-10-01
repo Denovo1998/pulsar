@@ -453,7 +453,7 @@ public class RangeEntryCacheImpl implements EntryCache {
                         // release cached entries placed in entriesToReturn
                         for (Entry entry : entriesToReturn) {
                             if (entry != null) {
-                                entry.release();
+                                releaseUndeliveredEntry(entry);
                             }
                         }
                         // release entries for futures which were completed successfully
@@ -462,7 +462,7 @@ public class RangeEntryCacheImpl implements EntryCache {
                                 List<Entry> readEntries = future.getNow(null);
                                 if (readEntries != null && !readEntries.isEmpty()) {
                                     for (Entry entry : readEntries) {
-                                        entry.release();
+                                        releaseUndeliveredEntry(entry);
                                     }
                                 }
                             }
@@ -479,14 +479,20 @@ public class RangeEntryCacheImpl implements EntryCache {
                         List<Entry> readEntries = future.getNow(null);
                         if (readEntries != null && !readEntries.isEmpty()) {
                             for (Entry entry : readEntries) {
-                                int index = (int) (entry.getPosition().getEntryId() - firstPosition.getEntryId());
-                                if (index >= 0 && index < entriesToReturn.size()) {
-                                    entriesToReturn.set(index, entry);
+                                long entryId = entry.getEntryId();
+                                long index = entryId - firstPosition.getEntryId();
+                                if (entry.getLedgerId() == firstPosition.getLedgerId()
+                                        && entryId >= firstPosition.getEntryId()
+                                        && entryId <= lastPosition.getEntryId()
+                                        && index < entriesToReturn.size()
+                                        && entriesToReturn.get((int) index) == null) {
+                                    entriesToReturn.set((int) index, entry);
                                 } else {
                                     log.warn().attr("entryPosition", entry.getPosition())
                                             .attr("firstPosition", firstPosition)
                                             .attr("lastPosition", lastPosition)
-                                            .log("Received entry outside of expected range");
+                                            .log("Received unexpected entry while assembling a mixed read");
+                                    releaseUndeliveredEntry(entry);
                                 }
                             }
                         }
@@ -499,6 +505,12 @@ public class RangeEntryCacheImpl implements EntryCache {
             pendingReadsManager.readEntries(lh, firstPosition.getEntryId(), lastPosition.getEntryId(),
                     maxSizeBytes, expectedReadCount, callback, ctx);
         }
+    }
+
+    private static void releaseUndeliveredEntry(Entry entry) {
+        // Releasing internal ownership must not count as a read by a consumer.
+        ((EntryImpl) entry).setDecreaseReadCountOnRelease(false);
+        entry.release();
     }
 
     /** Builds the final sparse result directly, allocating its list only after the first cache hit. */
