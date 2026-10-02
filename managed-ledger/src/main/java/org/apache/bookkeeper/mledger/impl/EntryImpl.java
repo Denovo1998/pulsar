@@ -64,18 +64,27 @@ public final class EntryImpl extends AbstractCASReferenceCounted
 
     private Runnable onDeallocate;
 
-    public static EntryImpl create(LedgerEntry ledgerEntry, int expectedReadCount) {
+    private static EntryImpl getEntryFromRecycler() {
         EntryImpl entry = RECYCLER.get();
+        // Post-release calls can rewrite state after deallocate() has cleared it. Initialize each
+        // new generation independently before the factory assigns its entry-specific state.
+        // This only hardens sequential poison-and-reuse; concurrent post-release access is still
+        // a caller ownership bug.
+        entry.position = null;
+        entry.decreaseReadCountOnRelease = true;
+        entry.messageMetadata = null;
+        entry.messageMetadataInitializationFailed = false;
+        entry.onDeallocate = null;
+        return entry;
+    }
+
+    public static EntryImpl create(LedgerEntry ledgerEntry, int expectedReadCount) {
+        EntryImpl entry = getEntryFromRecycler();
         entry.ledgerId = ledgerEntry.getLedgerId();
         entry.entryId = ledgerEntry.getEntryId();
         entry.data = ledgerEntry.getEntryBuffer();
         entry.data.retain();
         entry.readCountHandler = EntryReadCountHandlerImpl.maybeCreate(expectedReadCount);
-        // Reset the lazily-cached position LAST, after the id assignments: a recycled object can
-        // carry a stale Position materialized by a getPosition() call that raced past the recycle
-        // (deallocation nulls the field, but a late reader re-materializes it from the reset ids
-        // as (-1, -1)), and any racy lazy rebuild must observe the fresh legitimate ids.
-        entry.position = null;
         entry.setRefCnt(1);
         return entry;
     }
@@ -109,13 +118,11 @@ public final class EntryImpl extends AbstractCASReferenceCounted
 
     @VisibleForTesting
     public static EntryImpl create(long ledgerId, long entryId, byte[] data, int expectedReadCount) {
-        EntryImpl entry = RECYCLER.get();
+        EntryImpl entry = getEntryFromRecycler();
         entry.ledgerId = ledgerId;
         entry.entryId = entryId;
         entry.data = Unpooled.wrappedBuffer(data);
         entry.readCountHandler = EntryReadCountHandlerImpl.maybeCreate(expectedReadCount);
-        // Reset the lazily-cached position: see create(LedgerEntry, int).
-        entry.position = null;
         entry.setRefCnt(1);
         return entry;
     }
@@ -125,20 +132,18 @@ public final class EntryImpl extends AbstractCASReferenceCounted
     }
 
     public static EntryImpl create(long ledgerId, long entryId, ByteBuf data, int expectedReadCount) {
-        EntryImpl entry = RECYCLER.get();
+        EntryImpl entry = getEntryFromRecycler();
         entry.ledgerId = ledgerId;
         entry.entryId = entryId;
         entry.data = data;
         entry.data.retain();
         entry.readCountHandler = EntryReadCountHandlerImpl.maybeCreate(expectedReadCount);
-        // Reset the lazily-cached position: see create(LedgerEntry, int).
-        entry.position = null;
         entry.setRefCnt(1);
         return entry;
     }
 
     public static EntryImpl create(Position position, ByteBuf data, int expectedReadCount) {
-        EntryImpl entry = RECYCLER.get();
+        EntryImpl entry = getEntryFromRecycler();
         entry.position = PositionFactory.create(position);
         entry.ledgerId = position.getLedgerId();
         entry.entryId = position.getEntryId();
@@ -150,7 +155,7 @@ public final class EntryImpl extends AbstractCASReferenceCounted
     }
 
     public static EntryImpl createWithRetainedDuplicate(Position position, ByteBuf data, int expectedReadCount) {
-        EntryImpl entry = RECYCLER.get();
+        EntryImpl entry = getEntryFromRecycler();
         entry.position = PositionFactory.create(position);
         entry.ledgerId = position.getLedgerId();
         entry.entryId = position.getEntryId();
@@ -163,7 +168,7 @@ public final class EntryImpl extends AbstractCASReferenceCounted
     public static EntryImpl createWithRetainedDuplicate(Position position, ByteBuf data,
                                                         EntryReadCountHandler entryReadCountHandler,
                                                         MessageMetadata messageMetadata) {
-        EntryImpl entry = RECYCLER.get();
+        EntryImpl entry = getEntryFromRecycler();
         entry.position = PositionFactory.create(position);
         entry.ledgerId = position.getLedgerId();
         entry.entryId = position.getEntryId();
@@ -175,7 +180,7 @@ public final class EntryImpl extends AbstractCASReferenceCounted
     }
 
     public static EntryImpl create(EntryImpl other) {
-        EntryImpl entry = RECYCLER.get();
+        EntryImpl entry = getEntryFromRecycler();
         // handle case where other.position is null due to lazy initialization
         entry.position = other.position != null ? PositionFactory.create(other.position) : null;
         entry.ledgerId = other.ledgerId;
@@ -188,7 +193,7 @@ public final class EntryImpl extends AbstractCASReferenceCounted
     }
 
     public static EntryImpl create(Entry other) {
-        EntryImpl entry = RECYCLER.get();
+        EntryImpl entry = getEntryFromRecycler();
         entry.position = PositionFactory.create(other.getPosition());
         entry.ledgerId = other.getLedgerId();
         entry.entryId = other.getEntryId();

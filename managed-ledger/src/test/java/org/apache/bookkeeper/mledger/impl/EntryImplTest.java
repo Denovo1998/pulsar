@@ -31,9 +31,17 @@ import static org.testng.Assert.assertSame;
 import static org.testng.Assert.assertTrue;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.util.concurrent.FastThreadLocalThread;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.bookkeeper.client.impl.LedgerEntryImpl;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
+import org.apache.pulsar.common.api.proto.MessageMetadata;
+import org.apache.pulsar.common.protocol.Commands;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class EntryImplTest {
@@ -283,6 +291,152 @@ public class EntryImplTest {
         assertTrue(third.getPosition().compareTo(PositionFactory.create(7L, 30L)) == 0,
                 "ByteBuf variant: a recycled entry must not inherit the poisoned (-1, -1) position");
         third.release();
+    }
+
+    private enum CreationType {
+        LEDGER_ENTRY,
+        BYTE_ARRAY,
+        BYTE_BUF,
+        POSITION,
+        RETAINED_DUPLICATE,
+        RETAINED_DUPLICATE_WITH_METADATA,
+        ENTRY_IMPL,
+        ENTRY
+    }
+
+    @DataProvider(name = "recycledEntryFactories")
+    public Object[][] recycledEntryFactories() {
+        CreationType[] types = CreationType.values();
+        Object[][] cases = new Object[types.length * 2][];
+        for (int i = 0; i < types.length; i++) {
+            cases[i * 2] = new Object[]{types[i], false};
+            cases[i * 2 + 1] = new Object[]{types[i], true};
+        }
+        return cases;
+    }
+
+    @Test(dataProvider = "recycledEntryFactories")
+    public void testRecycledEntryDoesNotInheritPreviousGenerationState(CreationType creationType,
+                                                                     boolean cachedMetadata) throws Exception {
+        runOnRecyclerThread(() -> {
+            MessageMetadata metadata = new MessageMetadata()
+                    .setProducerName("new-generation")
+                    .setSequenceId(7)
+                    .setPublishTime(123456789L);
+            ByteBuf payload = Unpooled.wrappedBuffer(new byte[]{4, 5, 6});
+            ByteBuf serialized;
+            try {
+                serialized = Commands.serializeMetadataAndPayload(Commands.ChecksumType.Crc32c, metadata, payload);
+            } finally {
+                payload.release();
+            }
+            EntryImpl source;
+            try {
+                source = EntryImpl.create(6L, 20L, serialized, 1);
+            } finally {
+                serialized.release();
+            }
+            // The source acts as a cache-owned entry: only the returned read copy counts as a read.
+            source.setDecreaseReadCountOnRelease(false);
+            try {
+                if (cachedMetadata) {
+                    source.initializeMessageMetadataIfNeeded("ledger");
+                    assertThat(source.getMessageMetadata()).isNotNull();
+                }
+
+                EntryImpl previous = getRecyclableEntry();
+                previous.release();
+                // Reproduce sequential post-release writes through the public methods, before reuse.
+                previous.getPosition();
+                if (cachedMetadata) {
+                    previous.setMessageMetadata(new MessageMetadata().setProducerName("old-generation"));
+                } else {
+                    // data is null after deallocation; metadata initialization records a failure.
+                    previous.initializeMessageMetadataIfNeeded("ledger");
+                }
+                previous.setDecreaseReadCountOnRelease(false);
+                AtomicInteger staleCallbacks = new AtomicInteger();
+                previous.onDeallocate(staleCallbacks::incrementAndGet);
+
+                AtomicInteger currentCallbacks = new AtomicInteger();
+                EntryImpl current = createEntry(creationType, source);
+                EntryReadCountHandlerImpl readCountHandler =
+                        (EntryReadCountHandlerImpl) current.getReadCountHandler();
+                try {
+                    assertThat(current).as("%s must reuse the poisoned instance", creationType).isSameAs(previous);
+                    assertThat(current.refCnt()).isEqualTo(1);
+                    assertThat(current.getPosition()).isEqualTo(source.getPosition());
+                    assertThat(current.getData()).isEqualTo(source.getData());
+                    assertThat(readCountHandler.getExpectedReadCount()).isEqualTo(1);
+                    current.onDeallocate(currentCallbacks::incrementAndGet);
+
+                    MessageMetadata expectedMetadata = switch (creationType) {
+                        case RETAINED_DUPLICATE_WITH_METADATA, ENTRY_IMPL, ENTRY -> source.getMessageMetadata();
+                        default -> null;
+                    };
+                    assertThat(current.getMessageMetadata()).as("metadata before parsing").isSameAs(expectedMetadata);
+                    current.initializeMessageMetadataIfNeeded("ledger");
+                    assertThat(current.getMessageMetadata()).as("metadata for the new entry").isNotNull();
+                    assertThat(current.getMessageMetadata().getProducerName()).isEqualTo("new-generation");
+                    assertThat(current.getMessageMetadata().getSequenceId()).isEqualTo(7);
+                    assertThat(current.getDataBuffer().readerIndex()).isZero();
+                } finally {
+                    current.release();
+                }
+                assertThat(readCountHandler.getExpectedReadCount()).as("the new entry must count its release")
+                        .isZero();
+                assertThat(currentCallbacks.get()).isEqualTo(1);
+                assertThat(staleCallbacks.get()).as("the old generation's callback must not run").isZero();
+            } finally {
+                source.release();
+            }
+        });
+    }
+
+    private static EntryImpl createEntry(CreationType creationType, EntryImpl source) {
+        return switch (creationType) {
+            case LEDGER_ENTRY -> {
+                try (LedgerEntryImpl ledgerEntry = LedgerEntryImpl.create(source.getLedgerId(), source.getEntryId(),
+                        source.getLength(), source.getDataBuffer().retainedDuplicate())) {
+                    yield EntryImpl.create(ledgerEntry, 1);
+                }
+            }
+            case BYTE_ARRAY -> EntryImpl.create(source.getLedgerId(), source.getEntryId(), source.getData(), 1);
+            case BYTE_BUF -> EntryImpl.create(source.getLedgerId(), source.getEntryId(), source.getDataBuffer(), 1);
+            case POSITION -> EntryImpl.create(source.getPosition(), source.getDataBuffer(), 1);
+            case RETAINED_DUPLICATE ->
+                    EntryImpl.createWithRetainedDuplicate(source.getPosition(), source.getDataBuffer(), 1);
+            case RETAINED_DUPLICATE_WITH_METADATA -> EntryImpl.createWithRetainedDuplicate(source.getPosition(),
+                    source.getDataBuffer(), source.getReadCountHandler(), source.getMessageMetadata());
+            case ENTRY_IMPL -> EntryImpl.create(source);
+            case ENTRY -> EntryImpl.create((Entry) source);
+        };
+    }
+
+    private static EntryImpl getRecyclableEntry() {
+        EntryImpl entry = EntryImpl.create(5L, 10L, new byte[]{1, 2, 3});
+        for (int i = 0; i < 1024; i++) {
+            entry.release();
+            EntryImpl next = EntryImpl.create(5L, 10L, new byte[]{1, 2, 3});
+            if (next == entry) {
+                return next;
+            }
+            entry = next;
+        }
+        entry.release();
+        throw new AssertionError("EntryImpl recycler did not reuse an instance after warm-up");
+    }
+
+    private static void runOnRecyclerThread(Runnable test) throws Exception {
+        FutureTask<Void> task = new FutureTask<>(test, null);
+        Thread thread = new FastThreadLocalThread(task, "entry-reuse-state-test");
+        thread.start();
+        try {
+            task.get(30, TimeUnit.SECONDS);
+        } finally {
+            thread.join(TimeUnit.SECONDS.toMillis(30));
+        }
+        assertThat(thread.isAlive()).as("recycler test thread must terminate").isFalse();
     }
 
     private void assertEntryFields(EntryImpl entry, long expectedLedgerId, long expectedEntryId) {
