@@ -1380,7 +1380,11 @@ public class BrokerService implements Closeable {
                             }
                             return;
                         }
-                        context.close(timedOut);
+                        if (timedOut) {
+                            context.markTimedOut();
+                        } else {
+                            context.close(false);
+                        }
                         final var latency = context.getSnapshot().description();
                         if (timedOut) {
                             log.warn()
@@ -1397,7 +1401,7 @@ public class BrokerService implements Closeable {
                         context.recordTopicLoadFailureMetric(unwrapped);
                     } finally {
                         if (timedOut) {
-                            context.runAfterPendingActionsComplete(() -> log.warn()
+                            context.runAfterLoadingComplete(() -> log.warn()
                                     .attr("topic", topicName)
                                     .attr("latency", context.getSnapshot().description())
                                     .log("Finished pending topic loading actions after timeout"));
@@ -1408,6 +1412,7 @@ public class BrokerService implements Closeable {
                         .thenAccept(exists -> {
                     if (!exists && !createIfMissing) {
                         topicFuture.complete(Optional.empty());
+                        context.completeLoading();
                         return;
                     }
                     // The topic level policies are not needed now, but the meaning of calling
@@ -1434,16 +1439,17 @@ public class BrokerService implements Closeable {
                                 } else {
                                     topicFuture.completeExceptionally(e);
                                 }
+                                context.completeLoading();
                             });
                         }
                     }).exceptionally(e -> {
                         log.warn().attr("topic", topicName).log("Topic creation encountered an exception"
                                 + " by initialize topic policies service");
-                        failTopicFuture(topicName.toString(), topicFuture, e);
+                        failTopicFuture(context, e);
                         return null;
                     });
                 }).exceptionally(e -> {
-                    failTopicFuture(topicName.toString(), topicFuture, e);
+                    failTopicFuture(context, e);
                     return null;
                 });
                 return topicFuture;
@@ -1496,8 +1502,13 @@ public class BrokerService implements Closeable {
         }
     }
 
-    private void failTopicFuture(String topic, CompletableFuture<Optional<Topic>> topicFuture, Throwable throwable) {
-        pulsar.getExecutor().execute(() -> topics.remove(topic, topicFuture));
+    private void failTopicFuture(TopicLoadingContext context, Throwable throwable) {
+        final String topic = context.getTopicName().toString();
+        final CompletableFuture<Optional<Topic>> topicFuture = context.getTopicFuture();
+        pulsar.getExecutor().execute(() -> {
+            topics.remove(topic, topicFuture);
+            context.completeLoading();
+        });
         final Throwable rc = FutureUtil.unwrapCompletionException(throwable);
         // It will trigger the logging for exception and traced latencies in topicFuture's exceptionally callback, so
         // we don't need to add an extra log before it.
@@ -2102,7 +2113,7 @@ public class BrokerService implements Closeable {
                             // do not recreate topic if topic is already migrated and deleted by broker
                             // so, avoid creating a new topic if migration is already started
                             if (ex != null && (ex.getCause() instanceof TopicMigratedException)) {
-                                failTopicFuture(topic, topicFuture, ex);
+                                failTopicFuture(context, ex);
                                 return null;
                             }
                             createPendingLoadTopic();
@@ -2113,7 +2124,7 @@ public class BrokerService implements Closeable {
                         log.debug().attr("topic", topic).log("topic-loading for added into pending queue");
                     }
                 }).exceptionally(ex -> {
-                    failTopicFuture(topic, topicFuture, ex);
+                    failTopicFuture(context, ex);
                     return null;
                 });
 
@@ -2152,7 +2163,6 @@ public class BrokerService implements Closeable {
     private void checkOwnershipAndCreatePersistentTopic(TopicLoadingContext context) {
         TopicName topicName = context.getTopicName();
         final var topic = topicName.toString();
-        final var topicFuture = context.getTopicFuture();
         // ServiceUnitNotReadyException is classified as bundle_unloading when the topic future completes.
         context.trace(TopicLoadingTracePoints.OWNERSHIP, checkTopicNsOwnership(topic)).thenRun(() -> {
             CompletableFuture<Map<String, String>> propertiesFuture;
@@ -2168,11 +2178,11 @@ public class BrokerService implements Closeable {
                 //TODO add topicName in properties?
                 createPersistentTopic0(context);
             }).exceptionally(throwable -> {
-                failTopicFuture(topic, topicFuture, throwable);
+                failTopicFuture(context, throwable);
                 return null;
             });
         }).exceptionally(e -> {
-            failTopicFuture(topic, topicFuture, e);
+            failTopicFuture(context, e);
             return null;
         });
     }
@@ -2185,7 +2195,7 @@ public class BrokerService implements Closeable {
         final var createIfMissing = context.isCreateIfMissing();
 
         if (isTransactionInternalName(topicName)) {
-            failTopicFuture(topic, topicFuture, new NotAllowedException("Can not create transaction system topic "
+            failTopicFuture(context, new NotAllowedException("Can not create transaction system topic "
                     + topic));
             return;
         }
@@ -2313,10 +2323,12 @@ public class BrokerService implements Closeable {
                                                                     .exception(ex)
                                                                     .log("Get an error when closing topic.");
                                                         }
+                                                        context.completeLoading();
                                                     });
                                                 });
                                             } else {
                                                 addTopicToStatsMaps(topicName, persistentTopic);
+                                                context.completeLoading();
                                             }
                                         })
                                         .exceptionally((ex) -> {
@@ -2333,12 +2345,13 @@ public class BrokerService implements Closeable {
                                                                 .log("Get an error when closing topic.");
                                                     }
                                                     topicFuture.completeExceptionally(ex);
+                                                    context.completeLoading();
                                                 });
                                             });
                                             return null;
                                         });
                             } catch (Exception e) {
-                                failTopicFuture(topic, topicFuture, e);
+                                failTopicFuture(context, e);
                             }
                         }
 
@@ -2347,12 +2360,15 @@ public class BrokerService implements Closeable {
                             if (!createIfMissing && exception instanceof ManagedLedgerNotFoundException) {
                                 context.finishTrace(openMlTracePoint, null);
                                 // We were just trying to load a topic and the topic doesn't exist
-                                pulsar.getExecutor().execute(() -> topics.remove(topic, topicFuture));
+                                pulsar.getExecutor().execute(() -> {
+                                    topics.remove(topic, topicFuture);
+                                    context.completeLoading();
+                                });
                                 loadFuture.completeExceptionally(exception);
                                 topicFuture.complete(Optional.empty());
                             } else {
                                 context.finishTrace(openMlTracePoint, exception);
-                                failTopicFuture(topic, topicFuture, new PersistenceException(exception));
+                                failTopicFuture(context, new PersistenceException(exception));
                             }
                         }
                     }, () -> isTopicNsOwnedByBrokerAsync(topicName), null);
@@ -2364,7 +2380,7 @@ public class BrokerService implements Closeable {
             log.warn()
                     .attr("topic", topic)
                     .log(msg);
-            failTopicFuture(topic, topicFuture, exception);
+            failTopicFuture(context, exception);
             return null;
         });
     }
@@ -3954,6 +3970,7 @@ public class BrokerService implements Closeable {
             log.error().attr("topic", topic).exception(e).log("Failed to create pending topic");
             topicLoadingContext.getTopicFuture()
                     .completeExceptionally((e instanceof RuntimeException && e.getCause() != null) ? e.getCause() : e);
+            topicLoadingContext.completeLoading();
             // schedule to process next pending topic
             inactivityMonitor.schedule(this::createPendingLoadTopic, 100, MILLISECONDS);
             return null;

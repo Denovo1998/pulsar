@@ -74,6 +74,7 @@ import lombok.Cleanup;
 import lombok.CustomLog;
 import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.mledger.LedgerOffloader;
+import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl;
@@ -134,6 +135,7 @@ import org.apache.pulsar.common.policies.data.TopicStats;
 import org.apache.pulsar.common.protocol.Commands;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
 import org.apache.pulsar.compaction.Compactor;
+import org.apache.pulsar.utils.TestLogAppender;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.MockZooKeeper;
 import org.awaitility.Awaitility;
@@ -143,11 +145,146 @@ import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 @CustomLog
 @Test(groups = "broker")
 public class BrokerServiceTest extends BrokerTestBase {
+
+    public static class TimeoutTracingTopicFactory implements TopicFactory {
+        static final Map<String, LoadingTraceGates> GATES = new ConcurrentHashMap<>();
+
+        @Override
+        public <T extends Topic> T create(String topic, ManagedLedger ledger, BrokerService brokerService,
+                                          Class<T> topicClass) {
+            LoadingTraceGates gates = GATES.get(topic);
+            if (gates == null) {
+                return topicClass.cast(new PersistentTopic(topic, ledger, brokerService));
+            }
+            PersistentTopic persistentTopic = new PersistentTopic(topic, ledger, brokerService) {
+                @Override
+                public CompletableFuture<Void> initialize(TopicLoadingContext context) {
+                    gates.context.set(context);
+                    return gates.initialize.thenCompose(__ -> super.initialize(context));
+                }
+
+                @Override
+                public CompletableFuture<Void> preCreateSubscriptionForCompactionIfNeeded() {
+                    gates.compactionStarted.complete(null);
+                    return gates.compaction.thenCompose(__ -> super.preCreateSubscriptionForCompactionIfNeeded());
+                }
+            };
+            gates.topic.set(persistentTopic);
+            return topicClass.cast(persistentTopic);
+        }
+    }
+
+    private static class LoadingTraceGates {
+        final CompletableFuture<Void> initialize = new CompletableFuture<>();
+        final CompletableFuture<Void> compaction = new CompletableFuture<>();
+        final CompletableFuture<Void> compactionStarted = new CompletableFuture<>();
+        final AtomicReference<TopicLoadingContext> context = new AtomicReference<>();
+        final AtomicReference<PersistentTopic> topic = new AtomicReference<>();
+    }
+
+    @DataProvider
+    public Object[][] postTimeoutLoadingResults() {
+        return new Object[][] {{false}, {true}};
+    }
+
+    @Test(dataProvider = "postTimeoutLoadingResults", timeOut = 60000)
+    public void testTopicLoadingTraceContinuesAfterTimeout(boolean failAfterTimeout) throws Exception {
+        final String topicName = "persistent://" + newTopicName();
+        final long originalTimeout = conf.getTopicLoadTimeoutSeconds();
+        final String originalFactory = conf.getTopicFactoryClassName();
+        final LoadingTraceGates gates = new LoadingTraceGates();
+        @Cleanup
+        final TestLogAppender appender = TestLogAppender.create(BrokerService.class);
+        try {
+            restartBroker(configuration -> {
+                configuration.setTopicFactoryClassName(TimeoutTracingTopicFactory.class.getName());
+                configuration.setTopicLoadTimeoutSeconds(3);
+            });
+            // Warm metadata and ownership through a real load before delaying this topic's next initialization.
+            admin.lookups().lookupTopic(topicName);
+            pulsar.getBrokerService().getTopic(topicName, true).get(10, TimeUnit.SECONDS)
+                    .orElseThrow().close(false).get(10, TimeUnit.SECONDS);
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() ->
+                    !pulsar.getBrokerService().getTopics().containsKey(topicName));
+            TimeoutTracingTopicFactory.GATES.put(topicName, gates);
+
+            CompletableFuture<Optional<Topic>> topicFuture = pulsar.getBrokerService().getTopic(topicName, true);
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() -> gates.context.get() != null);
+            assertThatThrownBy(() -> topicFuture.get(10, TimeUnit.SECONDS))
+                    .hasRootCauseInstanceOf(TimeoutException.class);
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(topicLoadingLogs(appender, topicName, "Failed to load topic within")).hasSize(1));
+            assertThat(topicLoadingLogs(appender, topicName, "Finished pending topic loading actions after timeout"))
+                    .isEmpty();
+
+            gates.initialize.complete(null);
+            gates.compactionStarted.get(10, TimeUnit.SECONDS);
+            assertThat(topicLoadingLogs(appender, topicName, "Finished pending topic loading actions after timeout"))
+                    .as("the loading chain is still waiting for compaction subscription initialization").isEmpty();
+            TopicLoadingContext context = gates.context.get();
+            assertThat(context.isClosed()).isFalse();
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(context.isTracePending(TopicLoadingTracePoints.PRE_CREATE_COMPACTED_SUB)).isTrue());
+
+            if (failAfterTimeout) {
+                gates.compaction.completeExceptionally(new IllegalStateException("post-timeout compaction failure"));
+            } else {
+                gates.compaction.complete(null);
+            }
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() -> {
+                List<String> finishedLogs = topicLoadingLogs(appender, topicName,
+                        "Finished pending topic loading actions after timeout");
+                assertThat(finishedLogs).hasSize(1);
+                assertThat(finishedLogs.getFirst()).contains("timeout timestamp:", "init:",
+                        "pre-create-compacted-sub:").doesNotContain("pending steps:");
+                if (failAfterTimeout) {
+                    assertThat(finishedLogs.getFirst()).contains("failure reason: FAILED_INIT");
+                } else {
+                    assertThat(finishedLogs.getFirst()).contains("replication:", "deduplication:");
+                }
+                assertThat(context.isClosed()).isTrue();
+                assertThat(((ManagedLedgerImpl) gates.topic.get().getManagedLedger()).getState())
+                        .isEqualTo(ManagedLedgerImpl.State.Closed);
+                assertThat(pulsar.getBrokerService().getTopics()).doesNotContainKey(topicName);
+            });
+            assertThat(topicFuture).isCompletedExceptionally();
+
+            // A subsequent real client load must still create a usable topic after the late load was closed.
+            TimeoutTracingTopicFactory.GATES.remove(topicName);
+            @Cleanup
+            Consumer<String> consumer = pulsarClient.newConsumer(Schema.STRING).topic(topicName)
+                    .subscriptionName("retry").subscribe();
+            @Cleanup
+            Producer<String> producer = pulsarClient.newProducer(Schema.STRING).topic(topicName).create();
+            producer.send("after timeout");
+            assertThat(consumer.receive(10, TimeUnit.SECONDS).getValue()).isEqualTo("after timeout");
+        } finally {
+            gates.initialize.complete(null);
+            gates.compaction.complete(null);
+            TimeoutTracingTopicFactory.GATES.remove(topicName);
+            if (gates.topic.get() != null) {
+                Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                        assertThat(((ManagedLedgerImpl) gates.topic.get().getManagedLedger()).getState())
+                                .isEqualTo(ManagedLedgerImpl.State.Closed));
+            }
+            restartBroker(configuration -> {
+                configuration.setTopicFactoryClassName(originalFactory);
+                configuration.setTopicLoadTimeoutSeconds(originalTimeout);
+            });
+        }
+    }
+
+    private static List<String> topicLoadingLogs(TestLogAppender appender, String topic, String message) {
+        return appender.getEvents().stream().map(event ->
+                        event.getMessage().getFormattedMessage() + " " + event.getContextData().toMap())
+                .filter(text -> text.contains(topic) && text.contains(message)).toList();
+    }
 
     @Test
     public void testTopicLoadTimeoutReason() {

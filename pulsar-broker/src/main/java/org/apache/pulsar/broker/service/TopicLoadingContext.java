@@ -41,6 +41,7 @@ public class TopicLoadingContext extends LatencyTracer {
     @Getter
     private final CompletableFuture<Optional<Topic>> topicFuture;
     private final PulsarStats pulsarStats;
+    private final CompletableFuture<Void> loadingCompletion = new CompletableFuture<>();
     @Nullable
     private volatile Long timeoutTimeInMillis;
     @Getter
@@ -58,9 +59,26 @@ public class TopicLoadingContext extends LatencyTracer {
 
     public void close(boolean timedOut) {
         if (timedOut) {
-            this.timeoutTimeInMillis = System.currentTimeMillis();
+            markTimedOut();
         }
         super.close();
+    }
+
+    void markTimedOut() {
+        timeoutTimeInMillis = System.currentTimeMillis();
+    }
+
+    /**
+     * Ends the underlying loading chain, independently of the caller's timeout. All terminal loading paths,
+     * including closing a topic that completed after a timeout, must signal this completion.
+     */
+    void completeLoading() {
+        super.close();
+        loadingCompletion.complete(null);
+    }
+
+    void runAfterLoadingComplete(Runnable runnable) {
+        loadingCompletion.thenRun(() -> runAfterPendingActionsComplete(runnable));
     }
 
     @Override
@@ -100,10 +118,10 @@ public class TopicLoadingContext extends LatencyTracer {
         }
     }
 
-    public TopicLoadFailureReason getTopicLoadTimeoutReason() {
-        // If closed, we can use the reverse convenience set to obtain the last pending action, as the subsequent ones
-        // are often sub-actions of the previous one.
-        if (isClosed()) {
+    public synchronized TopicLoadFailureReason getTopicLoadTimeoutReason() {
+        // At timeout, prefer the last pending action, since later actions are often sub-actions of earlier ones.
+        // The tracer can still accept actions after a timeout, so keep this lookup under its monitor.
+        if (isClosed() || timeoutTimeInMillis != null) {
             for (int i = tracePoints.size() - 1; i >= 0; i--) {
                 if (tracePoints.get(i).isPending()) {
                     TopicLoadFailureReason reason = getTimeoutReason(tracePoints.get(i).name());
