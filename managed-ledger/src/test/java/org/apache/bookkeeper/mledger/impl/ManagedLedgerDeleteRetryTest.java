@@ -26,21 +26,90 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import io.netty.util.concurrent.DefaultThreadFactory;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.LedgerHandle;
 import org.apache.bookkeeper.common.util.OrderedScheduler;
+import org.apache.bookkeeper.mledger.AsyncCallbacks.DeleteLedgerCallback;
+import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
+import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.test.MockedBookKeeperTestCase;
 import org.mockito.ArgumentMatchers;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class ManagedLedgerDeleteRetryTest extends MockedBookKeeperTestCase {
+
+    @DataProvider(name = "deleteExecutorShutdown")
+    public Object[][] deleteExecutorShutdown() {
+        return new Object[][] {{false}, {true}};
+    }
+
+    @Test(dataProvider = "deleteExecutorShutdown", timeOut = 15_000)
+    public void testManagedLedgerDeleteFailsWhenDeleteExecutorShutsDown(boolean interruptWaitingTask) throws Exception {
+        Semaphore semaphore = new Semaphore(1);
+        ExecutorService deleteExecutor = Executors.newSingleThreadExecutor(new DefaultThreadFactory("ledger-delete"));
+        ManagedLedgerConfig config = defaultConfig().setLedgerDeletionSemaphore(semaphore)
+                .setLedgerDeleteExecutor(deleteExecutor);
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("delete-executor-shutdown", config);
+        ledger.addEntry(new byte[] {1});
+        long ledgerId = ledger.getCurrentLedger().getId();
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        AtomicBoolean callbackInterrupted = new AtomicBoolean();
+        AtomicInteger callbacks = new AtomicInteger();
+        // Hold the only permit so the accepted deletion task waits in acquire() until shutdownNow interrupts it.
+        semaphore.acquire();
+        try {
+            if (!interruptWaitingTask) {
+                deleteExecutor.shutdownNow();
+            }
+            ledger.asyncDelete(new DeleteLedgerCallback() {
+                @Override
+                public void deleteLedgerComplete(Object ctx) {
+                    callbacks.incrementAndGet();
+                    result.complete(null);
+                }
+
+                @Override
+                public void deleteLedgerFailed(ManagedLedgerException exception, Object ctx) {
+                    callbacks.incrementAndGet();
+                    callbackInterrupted.set(Thread.currentThread().isInterrupted());
+                    result.completeExceptionally(exception);
+                }
+            }, null);
+            if (interruptWaitingTask) {
+                await().atMost(5, TimeUnit.SECONDS).until(semaphore::hasQueuedThreads);
+                deleteExecutor.shutdownNow();
+            }
+
+            int errorCode = interruptWaitingTask ? BKException.Code.InterruptedException
+                    : BKException.Code.ClientClosedException;
+            assertThatThrownBy(() -> result.get(5, TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(ManagedLedgerException.class)
+                    .hasRootCauseMessage(BKException.getMessage(errorCode) + " error code: " + errorCode);
+            assertThat(deleteExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(callbacks.get()).isEqualTo(1);
+            assertThat(callbackInterrupted.get()).isEqualTo(interruptWaitingTask);
+            assertThat(semaphore.availablePermits()).isZero();
+            assertThat(bkc.getLedgers()).contains(ledgerId);
+            assertThat(metadataStore.exists("/managed-ledgers/" + ledger.getName()).get(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            semaphore.release();
+            deleteExecutor.shutdownNow();
+            assertThat(deleteExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+        assertThat(semaphore.availablePermits()).isEqualTo(1);
+    }
 
     @Test(timeOut = 15_000)
     public void testOriginalFutureCompletesWhenRetrySchedulingIsRejected() throws Exception {

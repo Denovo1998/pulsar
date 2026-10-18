@@ -3934,7 +3934,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      * @param ctx
      */
     private void asyncDeleteLedgerWithConcurrencyLimit(long ledgerId,
-                                                       org.apache.bookkeeper.client.AsyncCallback.DeleteCallback cb,
+                                                       AsyncCallback.DeleteCallback cb,
                                                        Object ctx) {
         if (!ownsLedgerData()) {
             log.debug().attr("ledgerId", ledgerId).log("Skipping deletion of ledger not owned by this managed ledger");
@@ -3946,14 +3946,21 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 deleteLedgerSemaphore.release();
                 cb.deleteComplete(rc, ctx1);
             };
-            deleteLedgerExecutor.execute(() -> {
-                try {
-                    deleteLedgerSemaphore.acquire();
+            try {
+                deleteLedgerExecutor.execute(() -> {
+                    try {
+                        deleteLedgerSemaphore.acquire();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        log.debug().attr("ledgerId", ledgerId).log("Interrupted while waiting to delete ledger");
+                        cb.deleteComplete(Code.InterruptedException, ctx);
+                        return;
+                    }
                     bookKeeper.asyncDeleteLedger(ledgerId, cbWrapper, ctx);
-                } catch (InterruptedException e) {
-                    log.error().attr("ledgerId", ledgerId).log("Interrupted while waiting to delete ledger");
-                }
-            });
+                });
+            } catch (RejectedExecutionException e) {
+                cb.deleteComplete(Code.ClientClosedException, ctx);
+            }
         } else {
             bookKeeper.asyncDeleteLedger(ledgerId, cb, ctx);
         }
