@@ -50,12 +50,15 @@ import org.apache.pulsar.metadata.api.NotificationType;
 import org.apache.pulsar.metadata.api.Option;
 import org.apache.pulsar.metadata.api.Stat;
 import org.apache.pulsar.metadata.api.coordination.CoordinationService;
+import org.apache.pulsar.metadata.api.coordination.LeaderElection;
 import org.apache.pulsar.metadata.api.coordination.LeaderElectionState;
 import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 import org.apache.pulsar.metadata.api.extended.SessionEvent;
 import org.apache.pulsar.metadata.impl.FaultInjectionMetadataStore;
 import org.apache.pulsar.metadata.impl.FaultInjectionMetadataStore.OperationType;
 import org.apache.pulsar.metadata.impl.LocalMemoryMetadataStore;
+import org.apache.pulsar.metadata.impl.ZKMetadataStore;
+import org.awaitility.Awaitility;
 import org.mockito.ArgumentCaptor;
 import org.testng.annotations.Test;
 
@@ -231,5 +234,118 @@ public class LeaderElectionImplTest extends BaseMetadataStoreTest {
         assertThat(stateChanges).as("state changes after close()").isEmpty();
         assertThat(le.getState()).isEqualTo(LeaderElectionState.NoLeader);
         assertThat(le.getLeaderValue().join()).isEmpty();
+    }
+
+    @Test(timeOut = 30000)
+    public void closedElectionWriteCompletionDoesNotDeleteNewLeadersNode() throws Exception {
+        String path = newKey();
+        MetadataStoreConfig config = MetadataStoreConfig.builder().sessionTimeoutMillis(2000).build();
+        ZKMetadataStore firstStore = new ZKMetadataStore(zks.getConnectionString(), config, true);
+        BlockingQueue<SessionEvent> sessionEvents = new LinkedBlockingQueue<>();
+        firstStore.registerSessionListener(sessionEvents::add);
+        @Cleanup
+        DelayedPutMetadataStore store = new DelayedPutMetadataStore(firstStore, path);
+        @Cleanup
+        ZKMetadataStore secondStore = new ZKMetadataStore(zks.getConnectionString(), config, true);
+        @Cleanup
+        CoordinationServiceImpl firstService = new CoordinationServiceImpl(store);
+        @Cleanup
+        CoordinationServiceImpl secondService = new CoordinationServiceImpl(secondStore);
+        LeaderElection<String> first = firstService.getLeaderElection(String.class, path, __ -> { });
+        LeaderElection<String> second = secondService.getLeaderElection(String.class, path, __ -> { });
+
+        CompletableFuture<LeaderElectionState> election = first.elect("test-1");
+        Stat created = store.committed.get(5, TimeUnit.SECONDS);
+        // The ephemeral node exists, but its successful put has not reached the election yet.
+        first.asyncClose().get(5, TimeUnit.SECONDS);
+
+        long oldSession = firstStore.getZkSessionId();
+        zks.expireSession(oldSession);
+        Awaitility.await().untilAsserted(() -> assertThat(secondStore.get(path).join()).isEmpty());
+        assertThat(second.elect("test-2").get(5, TimeUnit.SECONDS)).isEqualTo(LeaderElectionState.Leading);
+        // ZooKeeper resets the data version on recreation: the old version cannot identify the node.
+        assertThat(secondStore.get(path).join().orElseThrow().getStat().getVersion()).isEqualTo(created.getVersion());
+        long newLeaderCreation = secondStore.getZkClient().exists(path, false).getCzxid();
+        Awaitility.await().until(() -> sessionEvents.contains(SessionEvent.SessionReestablished));
+
+        store.released.complete(null);
+        assertThatThrownBy(() -> election.get(10, TimeUnit.SECONDS)).hasCauseInstanceOf(AlreadyClosedException.class);
+
+        // The second election can recreate a deleted node immediately. Pin its ZooKeeper identity,
+        // rather than only checking that a node exists or belongs to the second session again.
+        var survivor = secondStore.getZkClient().exists(path, false);
+        assertThat(survivor).as("the new leader's node after the closed election's put completes").isNotNull();
+        assertThat(survivor.getCzxid()).as("the new leader's original node").isEqualTo(newLeaderCreation);
+    }
+
+    @Test(timeOut = 20000)
+    public void closedElectionWriteCompletionDeletesItsOwnNode() throws Exception {
+        String path = newKey();
+        @Cleanup
+        DelayedPutMetadataStore store = new DelayedPutMetadataStore(
+                new LocalMemoryMetadataStore("memory:local", MetadataStoreConfig.builder().build()), path);
+        @Cleanup
+        CoordinationServiceImpl cs = new CoordinationServiceImpl(store);
+        LeaderElection<String> election = cs.getLeaderElection(String.class, path, __ -> { });
+
+        CompletableFuture<LeaderElectionState> result = election.elect("test-1");
+        store.committed.get(5, TimeUnit.SECONDS);
+        election.asyncClose().get(5, TimeUnit.SECONDS);
+        assertThat(store.get(path).join()).isPresent();
+
+        store.released.complete(null);
+        assertThatThrownBy(() -> result.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(AlreadyClosedException.class);
+        assertThat(store.get(path).join()).as("the closed election's own node").isEmpty();
+    }
+
+    @Test(timeOut = 20000)
+    public void closedElectionWriteCompletionKeepsUpdatedNode() throws Exception {
+        String path = newKey();
+        @Cleanup
+        DelayedPutMetadataStore store = new DelayedPutMetadataStore(
+                new LocalMemoryMetadataStore("memory:local", MetadataStoreConfig.builder().build()), path);
+        @Cleanup
+        CoordinationServiceImpl cs = new CoordinationServiceImpl(store);
+        LeaderElection<String> election = cs.getLeaderElection(String.class, path, __ -> { });
+
+        CompletableFuture<LeaderElectionState> result = election.elect("test-1");
+        Stat created = store.committed.get(5, TimeUnit.SECONDS);
+        election.asyncClose().get(5, TimeUnit.SECONDS);
+        Stat updated = store.put(path, new byte[]{1}, Optional.of(created.getVersion())).get(5, TimeUnit.SECONDS);
+
+        store.released.complete(null);
+        assertThatThrownBy(() -> result.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(AlreadyClosedException.class);
+        assertThat(store.get(path).join().orElseThrow().getStat().getVersion())
+                .as("the node updated after the closed election's put").isEqualTo(updated.getVersion());
+    }
+
+    private static class DelayedPutMetadataStore extends FaultInjectionMetadataStore {
+        private final String path;
+        private final AtomicBoolean holdNextPut = new AtomicBoolean(true);
+        private final CompletableFuture<Stat> committed = new CompletableFuture<>();
+        private final CompletableFuture<Void> released = new CompletableFuture<>();
+
+        DelayedPutMetadataStore(MetadataStoreExtended store, String path) {
+            super(store);
+            this.path = path;
+        }
+
+        @Override
+        public CompletableFuture<Stat> put(String p, byte[] value, Optional<Long> expectedVersion, Set<Option> opts) {
+            CompletableFuture<Stat> result = super.put(p, value, expectedVersion, opts);
+            if (p.equals(path) && holdNextPut.compareAndSet(true, false)) {
+                return result.thenCompose(stat -> {
+                    committed.complete(stat);
+                    return released.thenApply(__ -> stat);
+                });
+            }
+            return result;
+        }
+
+        @Override
+        public void close() throws Exception {
+            released.complete(null);
+            super.close();
+        }
     }
 }

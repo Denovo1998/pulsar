@@ -257,7 +257,7 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                             log.info().attr("path", path).attr("value", value).attr("stat", stat)
                                     .log("Leadership was lost. Conditionally deleting entry.");
                             // LeaderElection was closed in between. Release the lock asynchronously
-                            store.delete(path, Optional.of(stat.getVersion()))
+                            deleteLeaderNodeIfOwned(Optional.of(stat.getVersion()))
                                     .thenRun(() -> result.completeExceptionally(
                                             new AlreadyClosedException("The leader election was already closed")))
                                     .exceptionally(ex -> {
@@ -317,6 +317,19 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
             return CompletableFuture.completedFuture(null);
         }
 
+        return deleteLeaderNodeIfOwned(Optional.empty())
+                .thenAccept(__ -> {
+                            synchronized (LeaderElectionImpl.this) {
+                                leaderElectionState = LeaderElectionState.NoLeader;
+                                // Whether or not we deleted the node, a closed instance no longer observes
+                                // elections; don't keep reporting ourselves as leader.
+                                currentLeaderFuture = CompletableFuture.completedFuture(Optional.empty());
+                            }
+                        }
+                );
+    }
+
+    private CompletableFuture<Void> deleteLeaderNodeIfOwned(Optional<Long> expectedVersion) {
         // Only delete the leader node if it is still ours: if our session expired, the node we
         // created is already gone and the node at the path, if any, belongs to the participant
         // that won the re-election. An unconditional delete would remove that node and make the
@@ -326,7 +339,12 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                     if (optRes.isEmpty() || !optRes.get().getStat().isCreatedBySelf()) {
                         return CompletableFuture.completedFuture(null);
                     }
-                    return store.delete(path, Optional.of(optRes.get().getStat().getVersion()))
+                    long version = optRes.get().getStat().getVersion();
+                    if (expectedVersion.isPresent() && expectedVersion.get() != version) {
+                        // A late put completion must not delete a node updated since that put.
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return store.delete(path, Optional.of(version))
                             .exceptionally(ex -> {
                                 Throwable t = FutureUtil.unwrapCompletionException(ex);
                                 if (t instanceof NotFoundException || t instanceof BadVersionException) {
@@ -338,16 +356,7 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                                 }
                                 throw FutureUtil.wrapToCompletionException(ex);
                             });
-                })
-                .thenAccept(__ -> {
-                            synchronized (LeaderElectionImpl.this) {
-                                leaderElectionState = LeaderElectionState.NoLeader;
-                                // Whether or not we deleted the node, a closed instance no longer observes
-                                // elections; don't keep reporting ourselves as leader.
-                                currentLeaderFuture = CompletableFuture.completedFuture(Optional.empty());
-                            }
-                        }
-                );
+                });
     }
 
     @Override
