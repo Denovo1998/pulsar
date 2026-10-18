@@ -187,6 +187,9 @@ public class ManagedCursorImpl implements ManagedCursor {
     @VisibleForTesting
     volatile LedgerHandle cursorLedger;
 
+    // Protect the handle/type pair when fencing takes a local-cleanup snapshot during a ledger switch.
+    private final Object cursorLedgerMutex = new Object();
+
     // Wether the current cursorLedger is read-only or writable
     private boolean isCursorLedgerReadOnly = true;
     private boolean ledgerForceRecovery;
@@ -869,8 +872,10 @@ public class ManagedCursorImpl implements ManagedCursor {
         ledger.onCursorReadPositionUpdated(this, readPosition);
         lastMarkDeleteEntry = new MarkDeleteEntry(markDeletePosition, properties, null, null);
         // assign cursor-ledger so, it can be deleted when new ledger will be switched
-        this.cursorLedger = recoveredFromCursorLedger;
-        this.isCursorLedgerReadOnly = true;
+        synchronized (cursorLedgerMutex) {
+            this.cursorLedger = recoveredFromCursorLedger;
+            this.isCursorLedgerReadOnly = true;
+        }
         changeStateIfNotClosed(State.NoLedger);
     }
 
@@ -3225,6 +3230,32 @@ public class ManagedCursorImpl implements ManagedCursor {
                 }, ctx);
     }
 
+    /**
+     * Release local cursor resources after the managed ledger loses ownership. Graceful close is unsafe here:
+     * it persists the old owner's position and can delete the cursor ledger still needed by the new owner.
+     */
+    void closeAfterFencing() {
+        if (!trySetStateToClosing()) {
+            return;
+        }
+        closeWaitingCursor();
+        setInactive();
+        state = State.Closed;
+        LedgerHandle lh;
+        synchronized (cursorLedgerMutex) {
+            lh = isCursorLedgerReadOnly ? cursorLedger : null;
+        }
+        if (lh != null) {
+            // A read-only handle's close only unregisters its metadata listener. Closing a writable handle
+            // would also update BookKeeper metadata, which the fenced owner must not do.
+            FutureUtil.supplySafely(lh::closeAsync).exceptionally(error -> {
+                log.debug().attr("ledgerId", lh.getId()).exception(error)
+                        .log("Failed to close recovered cursor ledger after fencing");
+                return null;
+            });
+        }
+    }
+
     protected void closeWaitingCursor() {
         synchronized (registerToWaitingCursorsLock) {
             if (registeredToWaitingCursors) {
@@ -3784,9 +3815,12 @@ public class ManagedCursorImpl implements ManagedCursor {
                         .attr("markDeletePosition", markDeletePosition)
                         .attr("readPosition", readPosition)
                         .log("Updated cursor with new ledger");
-                final LedgerHandle oldLedger = cursorLedger;
-                cursorLedger = lh;
-                isCursorLedgerReadOnly = false;
+                final LedgerHandle oldLedger;
+                synchronized (cursorLedgerMutex) {
+                    oldLedger = cursorLedger;
+                    cursorLedger = lh;
+                    isCursorLedgerReadOnly = false;
+                }
 
                 // At this point the position had already been safely markdeleted
                 callback.operationComplete();
