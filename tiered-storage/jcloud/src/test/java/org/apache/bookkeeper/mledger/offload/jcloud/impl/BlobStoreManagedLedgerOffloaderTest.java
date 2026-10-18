@@ -41,21 +41,33 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import lombok.Cleanup;
 import lombok.CustomLog;
 import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.api.LedgerEntries;
 import org.apache.bookkeeper.client.api.LedgerEntry;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.client.api.ReadHandle;
+import org.apache.bookkeeper.discover.RegistrationClient;
+import org.apache.bookkeeper.meta.MetadataClientDriver;
 import org.apache.bookkeeper.mledger.LedgerOffloader;
 import org.apache.bookkeeper.mledger.LedgerOffloaderStats;
+import org.apache.bookkeeper.mledger.ManagedLedger;
+import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.OffloadedLedgerMetadata;
 import org.apache.bookkeeper.mledger.impl.LedgerOffloaderStatsImpl;
+import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
 import org.apache.bookkeeper.mledger.offload.jcloud.provider.JCloudBlobStoreProvider;
 import org.apache.bookkeeper.mledger.offload.jcloud.provider.TieredStorageConfiguration;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Versioned;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.policies.data.ManagedLedgerInternalStats;
+import org.apache.pulsar.metadata.api.MetadataStoreConfig;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
 import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.options.CopyOptions;
 import org.mockito.Mockito;
@@ -118,6 +130,50 @@ public class BlobStoreManagedLedgerOffloaderTest extends BlobStoreManagedLedgerO
         @Cleanup
         LedgerOffloader offloader = getOffloader();
         offloader.offload(buildReadHandle(), UUID.randomUUID(), new HashMap<>()).get();
+    }
+
+    @Test(timeOut = 60000)
+    public void testInternalStatsAfterOffloadWithUnavailableBookies() throws Exception {
+        @Cleanup
+        LedgerOffloader offloader = getOffloader();
+        @Cleanup
+        MetadataStoreExtended metadataStore = MetadataStoreExtended.create("memory:local",
+                MetadataStoreConfig.builder().metadataStoreName("offload-internal-stats").build());
+
+        BookKeeper bookKeeper = Mockito.spy(bk);
+        MetadataClientDriver metadataDriver = Mockito.spy(bk.getMetadataClientDriver());
+        RegistrationClient registrationClient = Mockito.spy(metadataDriver.getRegistrationClient());
+        Mockito.doReturn(metadataDriver).when(bookKeeper).getMetadataClientDriver();
+        Mockito.doReturn(registrationClient).when(metadataDriver).getRegistrationClient();
+
+        @Cleanup("shutdown")
+        ManagedLedgerFactoryImpl factory = new ManagedLedgerFactoryImpl(metadataStore, bookKeeper);
+        ManagedLedgerConfig ledgerConfig = new ManagedLedgerConfig();
+        ledgerConfig.setMaxEntriesPerLedger(2);
+        ledgerConfig.setMinimumRolloverTime(0, TimeUnit.SECONDS);
+        ledgerConfig.setRetentionTime(-1, TimeUnit.SECONDS);
+        ledgerConfig.setRetentionSizeInMB(-1);
+        ledgerConfig.setLedgerOffloader(offloader);
+        @Cleanup
+        ManagedLedger ledger = factory.open("public/default/persistent/offload-internal-stats", ledgerConfig);
+        ledger.addEntry(new byte[] {1});
+        ledger.addEntry(new byte[] {2});
+        ledger.addEntry(new byte[] {3});
+        ledger.offloadPrefix(ledger.getLastConfirmedEntry());
+
+        ManagedLedgerInternalStats healthyStats = ledger.getManagedLedgerInternalStats(true).get();
+        assertEquals(healthyStats.ledgers.size(), 2);
+        assertTrue(healthyStats.ledgers.get(0).offloaded);
+        Assert.assertFalse(healthyStats.ledgers.get(0).underReplicated);
+        Assert.assertFalse(healthyStats.ledgers.get(1).offloaded);
+        Assert.assertFalse(healthyStats.ledgers.get(1).underReplicated);
+
+        // The archived ensemble describes the old BookKeeper copies, which may no longer be available.
+        Mockito.doReturn(CompletableFuture.completedFuture(new Versioned<>(Collections.emptySet(), new LongVersion(1))))
+                .when(registrationClient).getWritableBookies();
+        ManagedLedgerInternalStats stats = ledger.getManagedLedgerInternalStats(true).get();
+        Assert.assertFalse(stats.ledgers.get(0).underReplicated);
+        assertTrue(stats.ledgers.get(1).underReplicated);
     }
 
     @Test(timeOut = 600000)  // 10 minutes.

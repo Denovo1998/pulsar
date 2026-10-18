@@ -5520,10 +5520,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                 info.underReplicated = false;
                             } else {
                                 info.metadata = lm.toSafeString();
-                                Set<BookieId> ensemble = lm.getAllEnsembles().values().stream()
-                                    .flatMap(Collection::stream)
-                                    .collect(Collectors.toSet());
-                                if (bookies != null) {
+                                // The original ensemble need not remain available once the ledger has been offloaded.
+                                if (bookies != null && !info.offloaded) {
+                                    Set<BookieId> ensemble = lm.getAllEnsembles().values().stream()
+                                        .flatMap(Collection::stream)
+                                        .collect(Collectors.toSet());
                                     info.underReplicated = !bookies.containsAll(ensemble);
                                 }
                             }
