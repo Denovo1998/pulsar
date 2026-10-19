@@ -3245,12 +3245,16 @@ public class ManagedCursorImpl implements ManagedCursor {
         synchronized (cursorLedgerMutex) {
             lh = isCursorLedgerReadOnly ? cursorLedger : null;
         }
+        closeReadOnlyCursorLedger(lh);
+    }
+
+    private void closeReadOnlyCursorLedger(LedgerHandle lh) {
         if (lh != null) {
             // A read-only handle's close only unregisters its metadata listener. Closing a writable handle
             // would also update BookKeeper metadata, which the fenced owner must not do.
             FutureUtil.supplySafely(lh::closeAsync).exceptionally(error -> {
                 log.debug().attr("ledgerId", lh.getId()).exception(error)
-                        .log("Failed to close recovered cursor ledger after fencing");
+                        .log("Failed to close recovered cursor ledger");
                 return null;
             });
         }
@@ -3816,11 +3820,16 @@ public class ManagedCursorImpl implements ManagedCursor {
                         .attr("readPosition", readPosition)
                         .log("Updated cursor with new ledger");
                 final LedgerHandle oldLedger;
+                final LedgerHandle oldReadHandle;
                 synchronized (cursorLedgerMutex) {
                     oldLedger = cursorLedger;
+                    oldReadHandle = isCursorLedgerReadOnly ? oldLedger : null;
                     cursorLedger = lh;
                     isCursorLedgerReadOnly = false;
                 }
+                // The displaced read handle no longer belongs to the cursor. Release it even if fencing
+                // observes the new write handle, or deleting the old ledger is delayed or fails.
+                closeReadOnlyCursorLedger(oldReadHandle);
 
                 // At this point the position had already been safely markdeleted
                 callback.operationComplete();

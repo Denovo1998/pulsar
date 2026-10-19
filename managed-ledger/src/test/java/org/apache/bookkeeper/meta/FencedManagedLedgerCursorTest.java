@@ -21,6 +21,9 @@ package org.apache.bookkeeper.meta;
 import static org.apache.bookkeeper.mledger.util.ManagedLedgerTestUtil.defaultConfig;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
 import java.util.List;
@@ -28,11 +31,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.Cleanup;
+import org.apache.bookkeeper.client.AsyncCallback.DeleteCallback;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.api.OpenBuilder;
 import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
+import org.apache.bookkeeper.mledger.AsyncCallbacks.MarkDeleteCallback;
 import org.apache.bookkeeper.mledger.Entry;
 import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
@@ -45,6 +51,8 @@ import org.apache.bookkeeper.mledger.impl.ManagedLedgerImpl;
 import org.apache.bookkeeper.mledger.util.Futures.CloseFuture;
 import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.LedgerMetadataListener;
 import org.apache.bookkeeper.test.BookKeeperClusterTestCase;
+import org.apache.pulsar.metadata.api.Stat;
+import org.apache.pulsar.metadata.impl.FaultInjectionMetadataStore;
 import org.awaitility.Awaitility;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -158,6 +166,132 @@ public class FencedManagedLedgerCursorTest extends BookKeeperClusterTestCase {
             resumeRecovery.complete(null);
             // Keep the shared BookKeeper client alive until all lifecycle assertions above have run.
             handle.closeAsync().get(10, TimeUnit.SECONDS);
+        }
+    }
+
+    @DataProvider
+    public Object[][] switchOrdering() {
+        return new Object[][] {{true}, {false}};
+    }
+
+    @Test(dataProvider = "switchOrdering", timeOut = 60000)
+    @SuppressWarnings("unchecked")
+    public void testFencedCloseReleasesDisplacedCursorListener(boolean switchBeforeFencedClose) throws Exception {
+        String name = "fenced-cursor-switch-" + UUID.randomUUID();
+        String cursorPath = "/managed-ledgers/" + name + "/cursor";
+        ManagedLedgerConfig config = defaultConfig().setEnsembleSize(2).setWriteQuorumSize(2).setAckQuorumSize(2)
+                .setMaxUnackedRangesToPersistInMetadataStore(0).setThrottleMarkDelete(0)
+                .setRetentionTime(1, TimeUnit.DAYS).setRetentionSizeInMB(-1);
+        @Cleanup("shutdown")
+        ManagedLedgerFactoryImpl initialFactory = new ManagedLedgerFactoryImpl(metadataStore, bkc);
+        ManagedLedgerImpl initialLedger = (ManagedLedgerImpl) initialFactory.open(name, config);
+        ManagedCursorImpl initialCursor = (ManagedCursorImpl) initialLedger.openCursor("cursor");
+        Position first = initialLedger.addEntry(new byte[] {1});
+        Position second = initialLedger.addEntry(new byte[] {2});
+        initialLedger.addEntry(new byte[] {3});
+        initialCursor.delete(second);
+        long cursorLedgerId = initialCursor.getCursorLedger();
+        assertThat(cursorLedgerId).isNotEqualTo(-1);
+        initialLedger.close();
+
+        CompletableFuture<ReadHandle> recoveryHandle = new CompletableFuture<>();
+        BookKeeper observedBookKeeper = delayCursorOpen(cursorLedgerId,
+                CompletableFuture.completedFuture(null), recoveryHandle);
+        CompletableFuture<Void> deleteRequested = new CompletableFuture<>();
+        CompletableFuture<Void> resumeDelete = new CompletableFuture<>();
+        doAnswer(invocation -> {
+            DeleteCallback callback = invocation.getArgument(1);
+            Object ctx = invocation.getArgument(2);
+            deleteRequested.complete(null);
+            // Delay the external request, then delegate the original callback to the real BookKeeper client.
+            resumeDelete.thenRun(() -> bkc.asyncDeleteLedger(cursorLedgerId, callback, ctx));
+            return null;
+        }).when(observedBookKeeper).asyncDeleteLedger(eq(cursorLedgerId), any(), any());
+
+        CompletableFuture<Stat> switchPersisted = new CompletableFuture<>();
+        CompletableFuture<Void> resumeSwitch = new CompletableFuture<>();
+        AtomicBoolean delaySwitch = new AtomicBoolean();
+        FaultInjectionMetadataStore observedStore = spy(metadataStore);
+        doAnswer(invocation -> {
+            CompletableFuture<Stat> update = (CompletableFuture<Stat>) invocation.callRealMethod();
+            if (delaySwitch.compareAndSet(true, false)) {
+                // The real metadata write commits before the switch callback is allowed to replace the handle.
+                return update.thenCompose(stat -> {
+                    switchPersisted.complete(stat);
+                    return resumeSwitch.thenApply(ignored -> stat);
+                });
+            }
+            return update;
+        }).when(observedStore).put(eq(cursorPath), any(byte[].class), any(), anySet());
+
+        @Cleanup("shutdown")
+        ManagedLedgerFactoryImpl oldFactory = new ManagedLedgerFactoryImpl(observedStore, observedBookKeeper);
+        ManagedLedgerImpl oldLedger = (ManagedLedgerImpl) oldFactory.open(name, config);
+        ManagedCursorImpl oldCursor = (ManagedCursorImpl) oldLedger.openCursor("cursor");
+        ReadHandle handle = recoveryHandle.get(10, TimeUnit.SECONDS);
+        CompletableFuture<Void> markDelete = new CompletableFuture<>();
+        try {
+            assertThat(hasListener(cursorLedgerId, handle)).isTrue();
+            delaySwitch.set(true);
+            oldCursor.asyncMarkDelete(first, new MarkDeleteCallback() {
+                @Override
+                public void markDeleteComplete(Object ctx) {
+                    markDelete.complete(null);
+                }
+
+                @Override
+                public void markDeleteFailed(ManagedLedgerException exception, Object ctx) {
+                    markDelete.completeExceptionally(exception);
+                }
+            }, null);
+            switchPersisted.get(10, TimeUnit.SECONDS);
+            assertThat(oldCursor.getCursorLedger()).isEqualTo(cursorLedgerId);
+            if (switchBeforeFencedClose) {
+                resumeSwitch.complete(null);
+                markDelete.get(10, TimeUnit.SECONDS);
+                deleteRequested.get(10, TimeUnit.SECONDS);
+                assertThat(oldCursor.getCursorLedger()).isNotEqualTo(cursorLedgerId);
+            }
+
+            @Cleanup("shutdown")
+            ManagedLedgerFactoryImpl successorFactory = new ManagedLedgerFactoryImpl(metadataStore, bkc);
+            ManagedLedgerImpl successor = (ManagedLedgerImpl) successorFactory.open(name, config);
+            ManagedCursor successorCursor = successor.openCursor("cursor");
+            assertThatThrownBy(() -> oldLedger.addEntry(new byte[] {4}))
+                    .isInstanceOf(ManagedLedgerException.class);
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).until(() -> oldLedger.getState().isFenced());
+            var metadataBeforeClose = metadataStore.get(cursorPath).get(10, TimeUnit.SECONDS).orElseThrow();
+
+            CloseFuture closing = new CloseFuture();
+            oldLedger.asyncClose(closing, null);
+            assertThatThrownBy(() -> closing.get(10, TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(ManagedLedgerFencedException.class);
+            resumeSwitch.complete(null);
+            deleteRequested.get(10, TimeUnit.SECONDS);
+            if (!switchBeforeFencedClose) {
+                assertThatThrownBy(() -> markDelete.get(10, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(ManagedLedgerException.class);
+            }
+            Awaitility.await().atMost(10, TimeUnit.SECONDS).untilAsserted(() ->
+                    assertThat(hasListener(cursorLedgerId, handle))
+                            .as("displaced read handle must close while its ledger deletion is pending").isFalse());
+            assertThat(oldCursor.isClosed()).isTrue();
+            assertThat(resumeDelete).isNotDone();
+            bkc.getLedgerManager().readLedgerMetadata(cursorLedgerId).get(10, TimeUnit.SECONDS);
+            var metadataAfterClose = metadataStore.get(cursorPath).get(10, TimeUnit.SECONDS).orElseThrow();
+            assertThat(metadataAfterClose.getValue()).isEqualTo(metadataBeforeClose.getValue());
+            assertThat(metadataAfterClose.getStat().getVersion()).isEqualTo(metadataBeforeClose.getStat().getVersion());
+            assertThatThrownBy(oldLedger::close).isInstanceOf(ManagedLedgerFencedException.class);
+            List<Entry> entries = successorCursor.readEntries(10);
+            try {
+                assertThat(entries).isNotEmpty();
+            } finally {
+                entries.forEach(Entry::release);
+            }
+        } finally {
+            resumeSwitch.complete(null);
+            handle.closeAsync().get(10, TimeUnit.SECONDS);
+            resumeDelete.complete(null);
         }
     }
 
