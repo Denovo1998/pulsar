@@ -60,6 +60,7 @@ import org.apache.pulsar.metadata.impl.LocalMemoryMetadataStore;
 import org.apache.pulsar.metadata.impl.ZKMetadataStore;
 import org.awaitility.Awaitility;
 import org.mockito.ArgumentCaptor;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class LeaderElectionImplTest extends BaseMetadataStoreTest {
@@ -276,6 +277,102 @@ public class LeaderElectionImplTest extends BaseMetadataStoreTest {
         var survivor = secondStore.getZkClient().exists(path, false);
         assertThat(survivor).as("the new leader's node after the closed election's put completes").isNotNull();
         assertThat(survivor.getCzxid()).as("the new leader's original node").isEqualTo(newLeaderCreation);
+    }
+
+    @DataProvider(name = "replacementElection")
+    public Object[][] replacementElection() {
+        return new Object[][]{{false}, {true}};
+    }
+
+    @Test(dataProvider = "replacementElection", timeOut = 30000)
+    public void closedElectionWriteCompletionDoesNotDeleteSameStoresReplacement(boolean newElectionInstance)
+            throws Exception {
+        String path = newKey();
+        MetadataStoreConfig config = MetadataStoreConfig.builder().sessionTimeoutMillis(2000).build();
+        ZKMetadataStore zkStore = new ZKMetadataStore(zks.getConnectionString(), config, true);
+        BlockingQueue<SessionEvent> sessionEvents = new LinkedBlockingQueue<>();
+        zkStore.registerSessionListener(sessionEvents::add);
+        @Cleanup
+        DelayedPutMetadataStore store = new DelayedPutMetadataStore(zkStore, path);
+        @Cleanup
+        CoordinationServiceImpl cs = new CoordinationServiceImpl(store);
+        LeaderElection<String> first = cs.getLeaderElection(String.class, path, __ -> { });
+
+        CompletableFuture<LeaderElectionState> election = first.elect("test-1");
+        Stat created = store.committed.get(5, TimeUnit.SECONDS);
+        first.asyncClose().get(5, TimeUnit.SECONDS);
+        zks.expireSession(zkStore.getZkSessionId());
+        Awaitility.await().until(() -> sessionEvents.contains(SessionEvent.SessionReestablished));
+        assertThat(store.get(path).join()).isEmpty();
+
+        // Both reopening the old instance and obtaining a fresh instance use the same store's
+        // reestablished session. Its replacement node passes the old ownership and version checks.
+        LeaderElection<String> replacement = newElectionInstance
+                ? cs.getLeaderElection(String.class, path, __ -> { }) : first;
+        assertThat(replacement.elect("test-1").get(5, TimeUnit.SECONDS)).isEqualTo(LeaderElectionState.Leading);
+        Stat replacementStat = store.get(path).join().orElseThrow().getStat();
+        assertThat(replacementStat.isCreatedBySelf()).isTrue();
+        assertThat(replacementStat.getVersion()).isEqualTo(created.getVersion());
+        long replacementCreation = zkStore.getZkClient().exists(path, false).getCzxid();
+
+        store.released.complete(null);
+        assertThatThrownBy(() -> election.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(AlreadyClosedException.class);
+
+        var survivor = zkStore.getZkClient().exists(path, false);
+        assertThat(survivor).as("the same store's replacement node after the old write completes").isNotNull();
+        assertThat(survivor.getCzxid()).as("the replacement election's original node").isEqualTo(replacementCreation);
+        assertThat(replacement.getState()).isEqualTo(LeaderElectionState.Leading);
+    }
+
+    @Test(timeOut = 30000)
+    public void closedElectionCleanupReadDoesNotDeleteAdoptedNode() throws Exception {
+        String path = newKey();
+        AtomicBoolean holdNextRead = new AtomicBoolean();
+        CompletableFuture<Void> readStarted = new CompletableFuture<>();
+        CompletableFuture<Void> readReleased = new CompletableFuture<>();
+        ZKMetadataStore zkStore = new ZKMetadataStore(zks.getConnectionString(),
+                MetadataStoreConfig.builder().build(), true);
+        @Cleanup
+        DelayedPutMetadataStore store = new DelayedPutMetadataStore(zkStore, path) {
+            @Override
+            public CompletableFuture<Optional<GetResult>> get(String p, Set<Option> opts) {
+                CompletableFuture<Optional<GetResult>> result = super.get(p, opts);
+                if (p.equals(path) && holdNextRead.compareAndSet(true, false)) {
+                    return result.thenCompose(res -> {
+                        readStarted.complete(null);
+                        return readReleased.thenApply(__ -> res);
+                    });
+                }
+                return result;
+            }
+        };
+        @Cleanup
+        CoordinationServiceImpl cs = new CoordinationServiceImpl(store);
+        LeaderElection<String> first = cs.getLeaderElection(String.class, path, __ -> { });
+        CompletableFuture<LeaderElectionState> election = first.elect("test-1");
+        store.committed.get(5, TimeUnit.SECONDS);
+        first.asyncClose().get(5, TimeUnit.SECONDS);
+
+        // Cleanup has started reading the node. While that read is held, a new election adopts
+        // the same session's existing node, so cleanup must recheck its attempt after the read.
+        holdNextRead.set(true);
+        store.released.complete(null);
+        try {
+            readStarted.get(5, TimeUnit.SECONDS);
+            LeaderElection<String> replacement = cs.getLeaderElection(String.class, path, __ -> { });
+            assertThat(replacement.elect("test-1").get(5, TimeUnit.SECONDS)).isEqualTo(LeaderElectionState.Leading);
+            long adoptedCreation = zkStore.getZkClient().exists(path, false).getCzxid();
+
+            readReleased.complete(null);
+            assertThatThrownBy(() -> election.get(5, TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(AlreadyClosedException.class);
+            var survivor = zkStore.getZkClient().exists(path, false);
+            assertThat(survivor).as("the node adopted while the old cleanup was reading").isNotNull();
+            assertThat(survivor.getCzxid()).isEqualTo(adoptedCreation);
+            assertThat(replacement.getState()).isEqualTo(LeaderElectionState.Leading);
+        } finally {
+            readReleased.complete(null);
+        }
     }
 
     @Test(timeOut = 20000)

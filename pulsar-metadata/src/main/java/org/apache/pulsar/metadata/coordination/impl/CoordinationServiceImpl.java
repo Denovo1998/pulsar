@@ -62,6 +62,9 @@ public class CoordinationServiceImpl implements CoordinationService {
     // The leader elections that are not closed, by path, to which the store notifications and session
     // events are dispatched. A closed election is removed, and added back if it's re-opened.
     private final Map<String, LeaderElectionImpl<?>> leaderElections = new ConcurrentHashMap<>();
+    // Only in-flight attempts are retained. A newer attempt on a path supersedes the old one,
+    // including attempts from an election that was closed and replaced on the same store session.
+    private final Map<String, Object> leaderElectionAttempts = new ConcurrentHashMap<>();
     private boolean leaderElectionListenersRegistered;
 
     private final ScheduledExecutorService executor;
@@ -215,6 +218,20 @@ public class CoordinationServiceImpl implements CoordinationService {
      */
     boolean readdLeaderElection(String path, LeaderElectionImpl<?> leaderElection) {
         return leaderElections.putIfAbsent(path, leaderElection) == null;
+    }
+
+    Object beginLeaderElectionAttempt(String path) {
+        Object attempt = new Object();
+        leaderElectionAttempts.put(path, attempt);
+        return attempt;
+    }
+
+    boolean isCurrentLeaderElectionAttempt(String path, Object attempt) {
+        return leaderElectionAttempts.get(path) == attempt;
+    }
+
+    void endLeaderElectionAttempt(String path, Object attempt) {
+        leaderElectionAttempts.remove(path, attempt);
     }
 
     @VisibleForTesting
