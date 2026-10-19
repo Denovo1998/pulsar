@@ -127,6 +127,7 @@ import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionBound;
 import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.WaitingEntryCallBack;
+import org.apache.bookkeeper.mledger.impl.LedgerDeletionExecutor.DeletionTask;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl.VoidCallback;
 import org.apache.bookkeeper.mledger.impl.MetaStore.MetaStoreCallback;
 import org.apache.bookkeeper.mledger.impl.cache.EntryCache;
@@ -3946,20 +3947,21 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 deleteLedgerSemaphore.release();
                 cb.deleteComplete(rc, ctx1);
             };
+            DeletionTask task = new DeletionTask(() -> {
+                try {
+                    deleteLedgerSemaphore.acquire();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.debug().attr("ledgerId", ledgerId).log("Interrupted while waiting to delete ledger");
+                    cb.deleteComplete(Code.InterruptedException, ctx);
+                    return;
+                }
+                bookKeeper.asyncDeleteLedger(ledgerId, cbWrapper, ctx);
+            }, () -> cb.deleteComplete(Code.ClientClosedException, ctx));
             try {
-                deleteLedgerExecutor.execute(() -> {
-                    try {
-                        deleteLedgerSemaphore.acquire();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        log.debug().attr("ledgerId", ledgerId).log("Interrupted while waiting to delete ledger");
-                        cb.deleteComplete(Code.InterruptedException, ctx);
-                        return;
-                    }
-                    bookKeeper.asyncDeleteLedger(ledgerId, cbWrapper, ctx);
-                });
+                deleteLedgerExecutor.execute(task);
             } catch (RejectedExecutionException e) {
-                cb.deleteComplete(Code.ClientClosedException, ctx);
+                task.reject();
             }
         } else {
             bookKeeper.asyncDeleteLedger(ledgerId, cb, ctx);

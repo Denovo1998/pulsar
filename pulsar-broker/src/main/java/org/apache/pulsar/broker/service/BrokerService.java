@@ -96,6 +96,7 @@ import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerNotFoundException;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
+import org.apache.bookkeeper.mledger.impl.LedgerDeletionExecutor;
 import org.apache.bookkeeper.mledger.impl.NonAppendableLedgerOffloader;
 import org.apache.bookkeeper.mledger.util.Futures;
 import org.apache.commons.collections4.MapUtils;
@@ -520,7 +521,12 @@ public class BrokerService implements Closeable {
                     .log("Setting managed ledger deletion max concurrent requests to");
             this.ledgerDeletionSemaphore = new Semaphore(
                     pulsar.getConfiguration().getManagedLedgerDeleteMaxConcurrentRequests());
-            this.ledgerDeletionExecutorProvider = new ExecutorProvider(1, "pulsar-ledger-deletion");
+            this.ledgerDeletionExecutorProvider = new ExecutorProvider(1, "pulsar-ledger-deletion") {
+                @Override
+                protected ExecutorService createExecutor(ExtendedThreadFactory threadFactory) {
+                    return new LedgerDeletionExecutor(super.createExecutor(threadFactory));
+                }
+            };
         } else {
             this.ledgerDeletionSemaphore = null;
             this.ledgerDeletionExecutorProvider = null;

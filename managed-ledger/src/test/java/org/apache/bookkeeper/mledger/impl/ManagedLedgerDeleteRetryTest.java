@@ -27,15 +27,17 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import io.netty.util.concurrent.DefaultThreadFactory;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerArray;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.LedgerHandle;
@@ -44,11 +46,106 @@ import org.apache.bookkeeper.mledger.AsyncCallbacks.DeleteLedgerCallback;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.test.MockedBookKeeperTestCase;
+import org.apache.pulsar.common.util.PulsarExecutors;
 import org.mockito.ArgumentMatchers;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 public class ManagedLedgerDeleteRetryTest extends MockedBookKeeperTestCase {
+
+    @DataProvider(name = "queuedDeleteCallbackFailure")
+    public Object[][] queuedDeleteCallbackFailure() {
+        return new Object[][] {{false}, {true}};
+    }
+
+    @Test(dataProvider = "queuedDeleteCallbackFailure", timeOut = 20_000)
+    public void testManagedLedgerDeleteFailsForTasksDrainedDuringShutdown(boolean throwFromQueuedCallback)
+            throws Exception {
+        Semaphore semaphore = new Semaphore(1);
+        ExecutorService deleteExecutor = new LedgerDeletionExecutor(
+                PulsarExecutors.newSingleThreadExecutor(new DefaultThreadFactory("queued-ledger-delete")));
+        ManagedLedgerConfig config = defaultConfig().setLedgerDeletionSemaphore(semaphore)
+                .setLedgerDeleteExecutor(deleteExecutor);
+        List<ManagedLedgerImpl> ledgers = new ArrayList<>();
+        List<CompletableFuture<Void>> results = new ArrayList<>();
+        AtomicIntegerArray callbacks = new AtomicIntegerArray(3);
+        semaphore.acquire();
+        try {
+            for (int i = 0; i < 3; i++) {
+                ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("delete-queued-" + i, config);
+                ledger.addEntry(new byte[] {1});
+                ledgers.add(ledger);
+                results.add(new CompletableFuture<>());
+            }
+            for (int i = 0; i < ledgers.size(); i++) {
+                int index = i;
+                ledgers.get(i).asyncDelete(new DeleteLedgerCallback() {
+                    @Override
+                    public void deleteLedgerComplete(Object ctx) {
+                        callbacks.incrementAndGet(index);
+                        results.get(index).complete(null);
+                    }
+
+                    @Override
+                    public void deleteLedgerFailed(ManagedLedgerException exception, Object ctx) {
+                        callbacks.incrementAndGet(index);
+                        results.get(index).completeExceptionally(exception);
+                        if (throwFromQueuedCallback && index == 1) {
+                            throw new IllegalStateException("delete callback failed");
+                        }
+                    }
+                }, null);
+                if (i == 0) {
+                    // The first deletion occupies the sole worker; subsequent deletions must remain queued.
+                    await().atMost(5, TimeUnit.SECONDS).until(semaphore::hasQueuedThreads);
+                }
+            }
+
+            assertThat(deleteExecutor.shutdownNow()).hasSize(2);
+            assertThat(deleteExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+            for (int i = 0; i < results.size(); i++) {
+                CompletableFuture<Void> result = results.get(i);
+                int errorCode = i == 0 ? BKException.Code.InterruptedException : BKException.Code.ClientClosedException;
+                assertThatThrownBy(() -> result.get(5, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(ManagedLedgerException.class)
+                        .hasRootCauseMessage(BKException.getMessage(errorCode) + " error code: " + errorCode);
+                assertThat(callbacks.get(i)).isEqualTo(1);
+                ManagedLedgerImpl ledger = ledgers.get(i);
+                assertThat(bkc.getLedgers()).contains(ledger.getCurrentLedger().getId());
+                assertThat(metadataStore.exists("/managed-ledgers/" + ledger.getName()).get(5, TimeUnit.SECONDS))
+                        .isTrue();
+            }
+            assertThat(semaphore.availablePermits()).isZero();
+        } finally {
+            semaphore.release();
+            deleteExecutor.shutdownNow();
+            assertThat(deleteExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+        assertThat(semaphore.availablePermits()).isEqualTo(1);
+    }
+
+    @Test(timeOut = 15_000)
+    public void testManagedLedgerDeleteReleasesAcquiredPermit() throws Exception {
+        Semaphore semaphore = new Semaphore(1);
+        ExecutorService deleteExecutor = new LedgerDeletionExecutor(
+                PulsarExecutors.newSingleThreadExecutor(new DefaultThreadFactory("successful-ledger-delete")));
+        try {
+            ManagedLedgerConfig config = defaultConfig().setLedgerDeletionSemaphore(semaphore)
+                    .setLedgerDeleteExecutor(deleteExecutor);
+            ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("delete-with-permit", config);
+            ledger.addEntry(new byte[] {1});
+            long ledgerId = ledger.getCurrentLedger().getId();
+
+            ledger.delete();
+
+            assertThat(semaphore.availablePermits()).isEqualTo(1);
+            assertThat(bkc.getLedgers()).doesNotContain(ledgerId);
+            assertThat(metadataStore.exists("/managed-ledgers/" + ledger.getName()).get(5, TimeUnit.SECONDS)).isFalse();
+        } finally {
+            deleteExecutor.shutdownNow();
+            assertThat(deleteExecutor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
 
     @DataProvider(name = "deleteExecutorShutdown")
     public Object[][] deleteExecutorShutdown() {
@@ -58,7 +155,8 @@ public class ManagedLedgerDeleteRetryTest extends MockedBookKeeperTestCase {
     @Test(dataProvider = "deleteExecutorShutdown", timeOut = 15_000)
     public void testManagedLedgerDeleteFailsWhenDeleteExecutorShutsDown(boolean interruptWaitingTask) throws Exception {
         Semaphore semaphore = new Semaphore(1);
-        ExecutorService deleteExecutor = Executors.newSingleThreadExecutor(new DefaultThreadFactory("ledger-delete"));
+        ExecutorService deleteExecutor = new LedgerDeletionExecutor(
+                PulsarExecutors.newSingleThreadExecutor(new DefaultThreadFactory("ledger-delete")));
         ManagedLedgerConfig config = defaultConfig().setLedgerDeletionSemaphore(semaphore)
                 .setLedgerDeleteExecutor(deleteExecutor);
         ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("delete-executor-shutdown", config);
