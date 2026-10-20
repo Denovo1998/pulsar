@@ -792,11 +792,19 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                         .attr("remaining", cursorCount.get() - 1)
                                         .attr("cost ms",  System.currentTimeMillis() - timestampStartRecoverCursor)
                                         .log("Lazy recovery for cursor completed");
-                                cursor.setActive();
                                 synchronized (ManagedLedgerImpl.this) {
-                                    addCursor(cursor);
-                                    uninitializedCursors.remove(cursor.getName()).complete(cursor);
+                                    if (!state.isFenced()) {
+                                        cursor.setActive();
+                                        addCursor(cursor);
+                                        uninitializedCursors.remove(cursorName).complete(cursor);
+                                        return;
+                                    }
+                                    uninitializedCursors.remove(cursorName);
                                 }
+                                // Recovery can finish after fenced close removed this ledger from the factory.
+                                // Release local resources outside the ledger monitor, without persisting metadata.
+                                cursor.closeAfterFencing();
+                                cursorRecoveryFuture.completeExceptionally(new ManagedLedgerFencedException());
                             }
 
                             @Override
@@ -1794,14 +1802,30 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @Override
-    public synchronized void asyncClose(final CloseCallback callback, final Object ctx) {
-        State state = STATE_UPDATER.get(this);
-        if (state.isFenced()) {
+    public void asyncClose(final CloseCallback callback, final Object ctx) {
+        List<ManagedCursor> fencedCursors;
+        synchronized (this) {
+            if (!state.isFenced()) {
+                asyncCloseUnfenced(callback, ctx);
+                return;
+            }
             cancelScheduledTasks();
             factory.close(this);
-            callback.closeFailed(new ManagedLedgerFencedException(), ctx);
-            return;
-        } else if (state == State.Closed) {
+            fencedCursors = new ArrayList<>();
+            for (ManagedCursor cursor : cursors) {
+                fencedCursors.add(cursor);
+            }
+        }
+        // Cursor cleanup can complete waiting reads and close BookKeeper handles. Do not call out under our monitor.
+        for (ManagedCursor cursor : fencedCursors) {
+            ((ManagedCursorImpl) cursor).closeAfterFencing();
+        }
+        callback.closeFailed(new ManagedLedgerFencedException(), ctx);
+    }
+
+    // Called with the managed-ledger monitor held, preserving normal close's synchronization.
+    private void asyncCloseUnfenced(final CloseCallback callback, final Object ctx) {
+        if (state == State.Closed) {
             log.debug("Ignoring request to close a closed managed ledger");
             callback.closeComplete(ctx);
             return;
