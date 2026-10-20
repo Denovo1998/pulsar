@@ -2681,9 +2681,13 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
         long ledgerId = ledgerHandle.getId();
         LedgerHandle currentLedger = this.currentLedger;
 
-        if (currentLedger != null && ledgerHandle != currentLedger) {
-            // remove handle from ledger cache since we got a (read) error
-            ledgerCache.remove(ledgerId);
+        if (ledgerHandle != currentLedger) {
+            // A late failure from an evicted handle must not remove its replacement.
+            CompletableFuture<ReadHandle> cachedHandle = ledgerCache.get(ledgerId);
+            if (cachedHandle == null || !cachedHandle.isDone() || cachedHandle.isCompletedExceptionally()
+                    || cachedHandle.getNow(null) != ledgerHandle || !ledgerCache.remove(ledgerId, cachedHandle)) {
+                return;
+            }
             log.debug().attr("ledgerId", ledgerId).log("Removed ledger read handle from cache");
             ledgerHandle.closeAsync()
                     .exceptionally(ex -> {
