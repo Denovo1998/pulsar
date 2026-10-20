@@ -27,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import lombok.CustomLog;
 import org.apache.bookkeeper.common.concurrent.FutureUtils;
@@ -149,20 +150,26 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
             return FutureUtil.failedFuture(new AlreadyClosedException("The leader election was already closed"));
         }
         // First check if there's already a leader elected
+        Object attempt = coordinationService.beginLeaderElectionAttempt(path);
         internalState = InternalState.ElectionInProgress;
-        return store.get(path).thenCompose(optLock -> {
+        CompletableFuture<LeaderElectionState> election = store.get(path).thenCompose(optLock -> {
             if (optLock.isPresent()) {
-                return handleExistingLeaderValue(optLock.get());
+                return handleExistingLeaderValue(optLock.get(), attempt);
             } else {
-                return tryToBecomeLeader();
+                return tryToBecomeLeader(attempt);
             }
         });
+        election.whenComplete((__, ___) -> coordinationService.endLeaderElectionAttempt(path, attempt));
+        // Callers must not complete/cancel the internal election or its attempt-cleanup observer.
+        return election.thenApply(state -> state);
     }
 
-    private synchronized CompletableFuture<LeaderElectionState> handleExistingLeaderValue(GetResult res) {
-        if (internalState == InternalState.Closed) {
-            // Closed while the lock was being read: the value read must not bring the election back, nor make it
-            // delete the lock
+    private synchronized CompletableFuture<LeaderElectionState> handleExistingLeaderValue(GetResult res,
+                                                                                         Object attempt) {
+        if (internalState == InternalState.Closed
+                || !coordinationService.isCurrentLeaderElectionAttempt(path, attempt)) {
+            // Closed or superseded while the lock was being read: the value read must not bring
+            // the old attempt back, nor make it delete the newer attempt's lock.
             return FutureUtil.failedFuture(new AlreadyClosedException("The leader election was already closed"));
         }
         T existingValue;
@@ -191,7 +198,7 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                 // Since the value was created in a different session, it might be expiring. We need to delete it
                 // and try the election again.
                 return store.delete(path, Optional.of(res.getStat().getVersion()))
-                        .thenCompose(__ -> tryToBecomeLeader());
+                        .thenCompose(__ -> tryToBecomeLeader(attempt));
             }
         } else if (res.getStat().isCreatedBySelf()) {
             log.warn().attr("existingValue", existingValue).attr("path", path).attr("proposedValue", value)
@@ -200,7 +207,7 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                             + " In tests this could happen because of an invalid shared session id when using mocks.");
             // The existing value is different but was created from the same session
             return store.delete(path, Optional.of(res.getStat().getVersion()))
-                    .thenCompose(__ -> tryToBecomeLeader());
+                    .thenCompose(__ -> tryToBecomeLeader(attempt));
         }
 
         // If the existing value is different, it means there's already another leader
@@ -221,10 +228,11 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
         }
     }
 
-    private synchronized CompletableFuture<LeaderElectionState> tryToBecomeLeader() {
-        if (internalState == InternalState.Closed) {
-            // Closed while the lock was read or deleted: don't take it. A close while the lock is written is
-            // handled once the write completes.
+    private synchronized CompletableFuture<LeaderElectionState> tryToBecomeLeader(Object attempt) {
+        if (internalState == InternalState.Closed
+                || !coordinationService.isCurrentLeaderElectionAttempt(path, attempt)) {
+            // Closed or superseded while the lock was read or deleted: don't take it. A close
+            // while the lock is written is handled once the write completes.
             return FutureUtil.failedFuture(new AlreadyClosedException("The leader election was already closed"));
         }
         T value = proposedValue.get();
@@ -239,6 +247,13 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
         store.put(path, payload, Optional.of(-1L), EnumSet.of(CreateOption.Ephemeral))
                 .thenAccept(stat -> {
                     synchronized (LeaderElectionImpl.this) {
+                        if (!coordinationService.isCurrentLeaderElectionAttempt(path, attempt)) {
+                            // A newer election can adopt or recreate this store's node with the same
+                            // version. Neither publish the stale result nor clean up the newer election.
+                            result.completeExceptionally(new AlreadyClosedException(
+                                    "The leader election attempt was superseded"));
+                            return;
+                        }
                         if (internalState == InternalState.ElectionInProgress) {
                             log.info().attr("path", path).attr("value", value)
                                     .log("Acquired leadership");
@@ -257,7 +272,8 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                             log.info().attr("path", path).attr("value", value).attr("stat", stat)
                                     .log("Leadership was lost. Conditionally deleting entry.");
                             // LeaderElection was closed in between. Release the lock asynchronously
-                            store.delete(path, Optional.of(stat.getVersion()))
+                            deleteLeaderNodeIfOwned(Optional.of(stat.getVersion()),
+                                    () -> coordinationService.isCurrentLeaderElectionAttempt(path, attempt))
                                     .thenRun(() -> result.completeExceptionally(
                                             new AlreadyClosedException("The leader election was already closed")))
                                     .exceptionally(ex -> {
@@ -267,21 +283,26 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                         }
                     }
                 }).exceptionally(ex -> {
-                    if (ex.getCause() instanceof BadVersionException) {
-                        // There was a conflict between 2 participants trying to become leaders at same time. Retry
-                        // to fetch info on new leader.
-                        log.info().attr("path", path).attr("value", value)
-                                .log("There was a conflict between 2 participants"
-                                        + " trying to become leaders at the same time."
-                                        + " Retrying.");
-                        elect()
-                            .thenAccept(lse -> result.complete(lse))
-                            .exceptionally(ex2 -> {
-                                result.completeExceptionally(ex2);
-                                return null;
-                            });
-                    } else {
-                        result.completeExceptionally(ex.getCause());
+                    synchronized (LeaderElectionImpl.this) {
+                        if (!coordinationService.isCurrentLeaderElectionAttempt(path, attempt)) {
+                            result.completeExceptionally(new AlreadyClosedException(
+                                    "The leader election attempt was superseded"));
+                        } else if (ex.getCause() instanceof BadVersionException) {
+                            // There was a conflict between 2 participants trying to become leaders at same time. Retry
+                            // to fetch info on new leader.
+                            log.info().attr("path", path).attr("value", value)
+                                    .log("There was a conflict between 2 participants"
+                                            + " trying to become leaders at the same time."
+                                            + " Retrying.");
+                            elect()
+                                .thenAccept(lse -> result.complete(lse))
+                                .exceptionally(ex2 -> {
+                                    result.completeExceptionally(ex2);
+                                    return null;
+                                });
+                        } else {
+                            result.completeExceptionally(ex.getCause());
+                        }
                     }
                     return null;
                 });
@@ -317,16 +338,40 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
             return CompletableFuture.completedFuture(null);
         }
 
+        return deleteLeaderNodeIfOwned(Optional.empty())
+                .thenAccept(__ -> {
+                            synchronized (LeaderElectionImpl.this) {
+                                leaderElectionState = LeaderElectionState.NoLeader;
+                                // Whether or not we deleted the node, a closed instance no longer observes
+                                // elections; don't keep reporting ourselves as leader.
+                                currentLeaderFuture = CompletableFuture.completedFuture(Optional.empty());
+                            }
+                        }
+                );
+    }
+
+    private CompletableFuture<Void> deleteLeaderNodeIfOwned(Optional<Long> expectedVersion) {
+        return deleteLeaderNodeIfOwned(expectedVersion, () -> true);
+    }
+
+    private CompletableFuture<Void> deleteLeaderNodeIfOwned(Optional<Long> expectedVersion,
+                                                           BooleanSupplier isCurrentAttempt) {
         // Only delete the leader node if it is still ours: if our session expired, the node we
         // created is already gone and the node at the path, if any, belongs to the participant
         // that won the re-election. An unconditional delete would remove that node and make the
         // new leader lose leadership for no reason.
         return store.get(path)
                 .thenCompose(optRes -> {
-                    if (optRes.isEmpty() || !optRes.get().getStat().isCreatedBySelf()) {
+                    if (!isCurrentAttempt.getAsBoolean()
+                            || optRes.isEmpty() || !optRes.get().getStat().isCreatedBySelf()) {
                         return CompletableFuture.completedFuture(null);
                     }
-                    return store.delete(path, Optional.of(optRes.get().getStat().getVersion()))
+                    long version = optRes.get().getStat().getVersion();
+                    if (expectedVersion.isPresent() && expectedVersion.get() != version) {
+                        // A late put completion must not delete a node updated since that put.
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return store.delete(path, Optional.of(version))
                             .exceptionally(ex -> {
                                 Throwable t = FutureUtil.unwrapCompletionException(ex);
                                 if (t instanceof NotFoundException || t instanceof BadVersionException) {
@@ -338,16 +383,7 @@ class LeaderElectionImpl<T> implements LeaderElection<T> {
                                 }
                                 throw FutureUtil.wrapToCompletionException(ex);
                             });
-                })
-                .thenAccept(__ -> {
-                            synchronized (LeaderElectionImpl.this) {
-                                leaderElectionState = LeaderElectionState.NoLeader;
-                                // Whether or not we deleted the node, a closed instance no longer observes
-                                // elections; don't keep reporting ourselves as leader.
-                                currentLeaderFuture = CompletableFuture.completedFuture(Optional.empty());
-                            }
-                        }
-                );
+                });
     }
 
     @Override
