@@ -510,9 +510,40 @@ public class PatternMultiTopicsConsumerImpl<T> extends MultiTopicsConsumerImpl<T
         return TopicList.calculateHash(getPartitions());
     }
 
+    @Override
     protected void handleSubscribeOneTopicError(String topicName,
                                                 Throwable error,
                                                 CompletableFuture<Void> subscribeFuture) {
-        subscribeFuture.completeExceptionally(error);
+        String partitionedTopic = TopicName.get(topicName).getPartitionedTopicName();
+        List<ConsumerImpl<T>> topicConsumers = consumers.values().stream()
+                .filter(consumer -> TopicName.get(consumer.getTopic()).getPartitionedTopicName()
+                        .equals(partitionedTopic))
+                .toList();
+        if (!TopicName.get(topicName).isPartitioned()) {
+            // A newly discovered topic can have both successful and failed partitions. Its normal
+            // success callback did not run, so start receiving from the successful partitions here.
+            startReceivingMessages(topicConsumers.stream()
+                    .filter(consumer -> consumer.subscribeFuture().isDone()
+                            && !consumer.subscribeFuture().isCompletedExceptionally())
+                    .toList());
+        }
+        List<CompletableFuture<Void>> closeFutures = new ArrayList<>();
+        for (ConsumerImpl<T> consumer : topicConsumers) {
+            if (consumer.subscribeFuture().isCompletedExceptionally()) {
+                closeFutures.add(consumer.closeAsync().whenComplete((__, closeError) -> {
+                    if (consumers.remove(consumer.getTopic(), consumer)) {
+                        allTopicPartitionsNumber.decrementAndGet();
+                    }
+                }));
+            }
+        }
+        FutureUtil.waitForAll(closeFutures).whenComplete((__, closeError) -> {
+            if (consumers.keySet().stream().noneMatch(topic ->
+                    TopicName.get(topic).getPartitionedTopicName().equals(partitionedTopic))) {
+                partitionedTopics.remove(partitionedTopic);
+            }
+            // Reconciliation must see only live subscriptions before it can retry this topic.
+            subscribeFuture.completeExceptionally(error);
+        });
     }
 }

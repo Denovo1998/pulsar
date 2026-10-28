@@ -243,7 +243,7 @@ public class MultiTopicsConsumerImpl<T> extends ConsumerBase<T> {
         }
     }
 
-    private void startReceivingMessages(List<ConsumerImpl<T>> newConsumers) {
+    void startReceivingMessages(List<ConsumerImpl<T>> newConsumers) {
         startReceivingMessages(newConsumers, false);
     }
 
@@ -1209,6 +1209,9 @@ public class MultiTopicsConsumerImpl<T> extends ConsumerBase<T> {
                 startReceivingMessages(consumers.values().stream()
                                 .filter(consumer1 -> {
                                     String consumerTopicName = consumer1.getTopic();
+                                    if (TopicName.get(topicName).isPartitioned()) {
+                                        return consumerTopicName.equals(topicName);
+                                    }
                                     return TopicName.get(consumerTopicName).getPartitionedTopicName().equals(
                                             TopicName.get(topicName).getPartitionedTopicName());
                                 })
