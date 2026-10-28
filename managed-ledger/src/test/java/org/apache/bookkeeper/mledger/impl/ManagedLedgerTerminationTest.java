@@ -19,6 +19,8 @@
 package org.apache.bookkeeper.mledger.impl;
 
 import static org.apache.bookkeeper.mledger.util.ManagedLedgerTestUtil.defaultConfig;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -41,6 +43,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import lombok.Cleanup;
 import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.PulsarMockLedgerHandle;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.AddEntryCallback;
 import org.apache.bookkeeper.mledger.AsyncCallbacks.TerminateCallback;
 import org.apache.bookkeeper.mledger.Entry;
@@ -72,6 +75,7 @@ public class ManagedLedgerTerminationTest extends MockedBookKeeperTestCase {
         Position lastPosition = ledger.terminate();
 
         assertEquals(lastPosition, p0);
+        assertEquals(ledger.terminate(), p0);
 
         try {
             ledger.addEntry("entry-1".getBytes());
@@ -93,6 +97,8 @@ public class ManagedLedgerTerminationTest extends MockedBookKeeperTestCase {
         ledger.close();
 
         ledger = factory.open("my_test_ledger", initManagedLedgerConfig(defaultConfig()));
+
+        assertEquals(ledger.terminate(), p0);
 
         try {
             ledger.addEntry("entry-1".getBytes());
@@ -216,6 +222,164 @@ public class ManagedLedgerTerminationTest extends MockedBookKeeperTestCase {
         assertEquals(completionOrder, List.of("entry-1", "entry-2"));
         assertEquals(terminated.get(), p1);
         assertTerminatedAt(factory, ledger, p1);
+    }
+
+    @Test(timeOut = 20000)
+    public void concurrentTerminateWaitsForLedgerClose() throws Exception {
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("my_test_ledger",
+                initManagedLedgerConfig(defaultConfig()));
+        Position p0 = ledger.addEntry("entry-0".getBytes());
+        List<String> completionOrder = new CopyOnWriteArrayList<>();
+        CompletableFuture<Void> responseGate = bkc.addEntryResponseGate();
+        CompletableFuture<Position> add = addEntryAsync(ledger, "entry-1");
+        CompletableFuture<Void> addCompleted = add.thenRun(() -> completionOrder.add("add"));
+        Awaitility.await().untilAsserted(() -> assertEquals(ledger.currentLedger.getLastAddConfirmed(), 1));
+        CompletableFuture<Void> closeGate = bkc.promiseAfter(0);
+        CompletableFuture<Position> first = terminateAsync(ledger);
+        CompletableFuture<Position> second = terminateAsync(ledger);
+        CompletableFuture<Void> firstCompleted = first.thenRun(() -> completionOrder.add("first"));
+        CompletableFuture<Void> secondCompleted = second.thenRun(() -> completionOrder.add("second"));
+        try {
+            assertThat(first).as("first terminate waits for the real ledger close").isNotDone();
+            assertThat(second).as("second terminate must wait too; early position: %s", second.getNow(null))
+                    .isNotDone();
+            responseGate.complete(null);
+            addCompleted.get(10, TimeUnit.SECONDS);
+        } finally {
+            responseGate.complete(null);
+            closeGate.complete(null);
+        }
+        Position finalPosition = PositionFactory.create(p0.getLedgerId(), 1);
+        assertThat(add.get(10, TimeUnit.SECONDS)).isEqualTo(finalPosition);
+        assertThat(first.get(10, TimeUnit.SECONDS)).isEqualTo(finalPosition);
+        assertThat(second.get(10, TimeUnit.SECONDS)).isEqualTo(finalPosition);
+        CompletableFuture.allOf(addCompleted, firstCompleted, secondCompleted).get(10, TimeUnit.SECONDS);
+        assertThat(completionOrder).hasSize(3);
+        assertThat(completionOrder.get(0)).as("add receipt precedes both terminate callbacks").isEqualTo("add");
+        assertTerminatedAt(factory, ledger, finalPosition);
+    }
+
+    @Test(timeOut = 20000)
+    public void concurrentTerminateReportsLedgerCloseFailure() throws Exception {
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("my_test_ledger",
+                initManagedLedgerConfig(defaultConfig()));
+        ledger.addEntry("entry-0".getBytes());
+        CompletableFuture<Void> closeGate = bkc.promiseAfter(0);
+        CompletableFuture<Position> first = terminateAsync(ledger);
+        CompletableFuture<Position> second = terminateAsync(ledger);
+        closeGate.completeExceptionally(BKException.create(BKException.Code.WriteException));
+        assertThatThrownBy(() -> first.get(10, TimeUnit.SECONDS))
+                .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(ManagedLedgerException.class);
+        assertThatThrownBy(() -> second.get(10, TimeUnit.SECONDS))
+                .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(ManagedLedgerException.class);
+        assertThatThrownBy(() -> terminateAsync(ledger).get(10, TimeUnit.SECONDS))
+                .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(ManagedLedgerException.class);
+        assertThat(factory.getManagedLedgerInfo(ledger.getName()).terminatedPosition).isNull();
+    }
+
+    @Test(timeOut = 20000, dataProvider = "ledgersListUpdateFails")
+    @SuppressWarnings("unchecked")
+    public void concurrentTerminateWaitsForMetadata(boolean updateFails) throws Exception {
+        String mlPath = "/managed-ledgers/my_test_ledger";
+        CompletableFuture<Void> metadataGate = new CompletableFuture<>();
+        CountDownLatch putIntercepted = new CountDownLatch(1);
+        AtomicBoolean interceptNextPut = new AtomicBoolean();
+        FaultInjectionMetadataStore spyStore = spy(metadataStore);
+        doAnswer(inv -> {
+            CompletableFuture<Stat> realResponse = (CompletableFuture<Stat>) inv.callRealMethod();
+            if (!interceptNextPut.compareAndSet(true, false)) {
+                return realResponse;
+            }
+            putIntercepted.countDown();
+            return metadataGate.thenCompose(ignore -> realResponse);
+        }).when(spyStore).put(eq(mlPath), any(byte[].class), any());
+        @Cleanup("shutdown")
+        ManagedLedgerFactoryImpl gatedFactory = new ManagedLedgerFactoryImpl(spyStore, bkc);
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl) gatedFactory.open("my_test_ledger",
+                initManagedLedgerConfig(defaultConfig()));
+        Position expected = ledger.addEntry("entry-0".getBytes());
+        if (updateFails) {
+            metadataStore.failConditional(new MetadataStoreException("injected termination metadata failure"),
+                    (operation, path) -> operation == FaultInjectionMetadataStore.OperationType.PUT
+                            && path.equals(mlPath));
+        }
+        interceptNextPut.set(true);
+        CompletableFuture<Position> first = terminateAsync(ledger);
+        CompletableFuture<Position> second;
+        try {
+            assertThat(putIntercepted.await(10, TimeUnit.SECONDS)).isTrue();
+            second = terminateAsync(ledger);
+            assertThat(first).as("first terminate waits for metadata completion").isNotDone();
+            if (!updateFails) {
+                assertThat(second).as("second terminate must wait for the same metadata completion").isNotDone();
+            }
+        } finally {
+            metadataGate.complete(null);
+        }
+        if (updateFails) {
+            assertThatThrownBy(() -> first.get(10, TimeUnit.SECONDS))
+                    .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(ManagedLedgerException.class);
+            assertThatThrownBy(() -> second.get(10, TimeUnit.SECONDS))
+                    .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(ManagedLedgerException.class);
+            assertThat(gatedFactory.getManagedLedgerInfo(ledger.getName()).terminatedPosition).isNull();
+        } else {
+            assertThat(first.get(10, TimeUnit.SECONDS)).isEqualTo(expected);
+            assertThat(second.get(10, TimeUnit.SECONDS)).isEqualTo(expected);
+            assertTerminatedAt(gatedFactory, ledger, expected);
+        }
+    }
+
+    @Test(timeOut = 20000)
+    public void terminationCanRetryMetadataFailure() throws Exception {
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("my_test_ledger",
+                initManagedLedgerConfig(defaultConfig()));
+        Position expected = ledger.addEntry("entry-0".getBytes());
+        PulsarMockLedgerHandle handle = (PulsarMockLedgerHandle) ledger.currentLedger;
+        metadataStore.failConditional(new MetadataStoreException("injected termination metadata failure"),
+                (operation, path) -> operation == FaultInjectionMetadataStore.OperationType.PUT
+                        && path.equals("/managed-ledgers/my_test_ledger"));
+        assertThatThrownBy(() -> terminateAsync(ledger).get(10, TimeUnit.SECONDS))
+                .isInstanceOf(ExecutionException.class).hasCauseInstanceOf(ManagedLedgerException.class);
+        assertThat(factory.getManagedLedgerInfo(ledger.getName()).terminatedPosition).isNull();
+
+        assertThat(terminateAsync(ledger).get(10, TimeUnit.SECONDS)).isEqualTo(expected);
+        assertThat(handle.getAsyncCloseCount().get()).as("retry only the metadata write").isEqualTo(1);
+        assertThat(factory.getManagedLedgerInfo(ledger.getName()).terminatedPosition)
+                .as("retry must persist the final terminated position").isNotNull();
+        assertTerminatedAt(factory, ledger, expected);
+        ledger.close();
+        ManagedLedger reopened = factory.open("my_test_ledger", initManagedLedgerConfig(defaultConfig()));
+        assertThat(reopened.terminate()).isEqualTo(expected);
+    }
+
+    @Test(timeOut = 20000)
+    public void terminationCallbackFailureDoesNotBlockOtherWaiters() throws Exception {
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open("my_test_ledger",
+                initManagedLedgerConfig(defaultConfig()));
+        Position expected = ledger.addEntry("entry-0".getBytes());
+        CompletableFuture<Void> closeGate = bkc.promiseAfter(0);
+        CompletableFuture<Position> callbackInvoked = new CompletableFuture<>();
+        ledger.asyncTerminate(new TerminateCallback() {
+            @Override
+            public void terminateComplete(Position lastCommittedPosition, Object ctx) {
+                callbackInvoked.complete(lastCommittedPosition);
+                throw new IllegalStateException("injected caller callback failure");
+            }
+
+            @Override
+            public void terminateFailed(ManagedLedgerException exception, Object ctx) {
+                callbackInvoked.completeExceptionally(exception);
+            }
+        }, null);
+        CompletableFuture<Position> second = terminateAsync(ledger);
+        try {
+            assertThat(second).as("wait for the same termination before invoking either callback").isNotDone();
+        } finally {
+            closeGate.complete(null);
+        }
+        assertThat(callbackInvoked.get(10, TimeUnit.SECONDS)).isEqualTo(expected);
+        assertThat(second.get(10, TimeUnit.SECONDS)).isEqualTo(expected);
+        assertTerminatedAt(factory, ledger, expected);
     }
 
     @Test(timeOut = 20000)
