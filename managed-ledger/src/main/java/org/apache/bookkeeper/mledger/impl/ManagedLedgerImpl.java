@@ -352,6 +352,10 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
             AtomicReferenceFieldUpdater.newUpdater(ManagedLedgerImpl.class, State.class, "state");
     protected volatile State state = null;
     private volatile boolean migrated = false;
+    // Guarded by this; includes closing the ledger and storing its final terminated position.
+    private CompletableFuture<Position> terminationFuture;
+    // Guarded by this; only a successful close permits retrying a failed termination metadata update.
+    private boolean terminationLedgerClosed;
     // Set when the factory abandons the initialization, so that it stops before its next step
     private volatile boolean initializationAbandoned = false;
 
@@ -1708,36 +1712,78 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
     }
 
     @Override
-    public synchronized void asyncTerminate(TerminateCallback callback, Object ctx) {
-        if (state.isFenced()) {
-            callback.terminateFailed(new ManagedLedgerFencedException(), ctx);
+    public void asyncTerminate(TerminateCallback callback, Object ctx) {
+        final CompletableFuture<Position> result;
+        LedgerHandle ledgerToClose = null;
+        boolean startTermination = false;
+        synchronized (this) {
+            if (state.isFenced()) {
+                result = CompletableFuture.failedFuture(new ManagedLedgerFencedException());
+            } else if (state == State.Closed) {
+                result = CompletableFuture.failedFuture(
+                        new ManagedLedgerAlreadyClosedException("Managed ledger is already closed"));
+            } else if (terminationFuture != null
+                    && (!terminationFuture.isCompletedExceptionally() || !terminationLedgerClosed)) {
+                // Join the real operation, including its failure if the BookKeeper close did not succeed.
+                result = terminationFuture;
+            } else if (terminationFuture == null && state == State.Terminated) {
+                // A terminated ledger recovered from metadata has no in-flight termination operation.
+                result = CompletableFuture.completedFuture(lastConfirmedEntry);
+            } else {
+                result = new CompletableFuture<>();
+                terminationFuture = result;
+                startTermination = true;
+                if (state != State.Terminated) {
+                    terminationLedgerClosed = false;
+                    state = State.Terminated;
+                    ledgerToClose = currentLedger;
+                }
+            }
+        }
+
+        result.whenComplete((position, error) -> {
+            try {
+                if (error == null) {
+                    callback.terminateComplete(position, ctx);
+                } else {
+                    callback.terminateFailed(ManagedLedgerException.getManagedLedgerException(error), ctx);
+                }
+            } catch (Throwable t) {
+                log.error().exception(t).log("Managed ledger termination callback failed");
+            }
+        });
+
+        if (!startTermination) {
             return;
-        } else if (state == State.Terminated) {
-            log.debug("Ignoring request to terminate an already terminated managed ledger");
-            callback.terminateComplete(lastConfirmedEntry, ctx);
+        }
+        if (ledgerToClose == null) {
+            // The previous close succeeded, so only the failed metadata write needs to be retried.
+            storeTerminatedPosition(result);
             return;
         }
 
-        log.info("Terminating managed ledger");
-        state = State.Terminated;
-
-        LedgerHandle lh = currentLedger;
-        log.debug().attr("ledgerId", lh.getId()).log("Closing current writing ledger");
-
+        LedgerHandle lh = ledgerToClose;
+        log.debug().attr("ledgerId", lh.getId()).log("Closing current writing ledger for termination");
         mbean.startDataLedgerCloseOp();
-        lh.asyncClose((rc, lh1, ctx1) -> {
-            log.debug().attr("ledgerId", lh.getId()).attr("rc", rc).log("Close complete for ledger");
-            mbean.endDataLedgerCloseOp();
-            if (rc != BKException.Code.OK) {
-                callback.terminateFailed(createManagedLedgerException(rc), ctx);
-            } else {
-                synchronized (ManagedLedgerImpl.this) {
-                    lastConfirmedEntry = PositionFactory.create(lh.getId(), lh.getLastAddConfirmed());
-                    updateClosedLedgerInfo(lh, lh.getLastAddConfirmed(), false);
+        try {
+            lh.asyncClose((rc, lh1, ctx1) -> {
+                log.debug().attr("ledgerId", lh.getId()).attr("rc", rc).log("Close complete for ledger");
+                mbean.endDataLedgerCloseOp();
+                if (rc != BKException.Code.OK) {
+                    result.completeExceptionally(createManagedLedgerException(rc));
+                } else {
+                    synchronized (ManagedLedgerImpl.this) {
+                        lastConfirmedEntry = PositionFactory.create(lh.getId(), lh.getLastAddConfirmed());
+                        updateClosedLedgerInfo(lh, lh.getLastAddConfirmed(), false);
+                        terminationLedgerClosed = true;
+                    }
+                    storeTerminatedPosition(result);
                 }
-                storeTerminatedPosition(callback, ctx);
-            }
-        }, null);
+            }, null);
+        } catch (Throwable t) {
+            mbean.endDataLedgerCloseOp();
+            result.completeExceptionally(ManagedLedgerException.getManagedLedgerException(t));
+        }
     }
 
     /**
@@ -1746,23 +1792,47 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
      * the rollover through the metadata mutex, or one of the two fails on the expected version and fences the managed
      * ledger.
      */
-    private synchronized void storeTerminatedPosition(TerminateCallback callback, Object ctx) {
-        if (state != State.Terminated) {
-            // Closed or fenced while waiting for the metadata mutex
-            log.debug().attr("state", state).log("Not storing the terminated position");
-            callback.terminateFailed(state.isFenced() ? new ManagedLedgerFencedException()
-                    : new ManagedLedgerAlreadyClosedException("Managed ledger was closed while terminating"), ctx);
+    private void storeTerminatedPosition(CompletableFuture<Position> terminationResult) {
+        ManagedLedgerInfo info = null;
+        Stat version = null;
+        ManagedLedgerException failure = null;
+        synchronized (this) {
+            if (state != State.Terminated) {
+                // Closed or fenced while waiting for the metadata mutex.
+                failure = state.isFenced() ? new ManagedLedgerFencedException()
+                        : new ManagedLedgerAlreadyClosedException("Managed ledger was closed while terminating");
+            } else if (metadataMutex.tryLock()) {
+                try {
+                    info = getManagedLedgerInfo();
+                    version = ledgersStat;
+                } catch (Throwable t) {
+                    metadataMutex.unlock();
+                    failure = ManagedLedgerException.getManagedLedgerException(t);
+                }
+            }
+        }
+        if (failure != null) {
+            terminationResult.completeExceptionally(failure);
             return;
         }
-        if (!metadataMutex.tryLock()) {
+        if (info == null) {
             // Wait for the other update to complete: its callback brings the ledgers list and its version up to date
-            scheduledExecutor.schedule(() -> storeTerminatedPosition(callback, ctx), 100, TimeUnit.MILLISECONDS);
+            try {
+                scheduledExecutor.schedule(() -> storeTerminatedPosition(terminationResult),
+                        100, TimeUnit.MILLISECONDS);
+            } catch (Throwable t) {
+                terminationResult.completeExceptionally(ManagedLedgerException.getManagedLedgerException(t));
+            }
             return;
         }
 
-        store.asyncUpdateLedgerIds(name, getManagedLedgerInfo(), ledgersStat, new MetaStoreCallback<Void>() {
+        AtomicBoolean completed = new AtomicBoolean();
+        MetaStoreCallback<Void> callback = new MetaStoreCallback<Void>() {
             @Override
             public void operationComplete(Void result, Stat stat) {
+                if (!completed.compareAndSet(false, true)) {
+                    return;
+                }
                 ledgersStat = stat;
                 metadataMutex.unlock();
                 log.info().attr("lastConfirmedEntry", lastConfirmedEntry).log("Terminated managed ledger");
@@ -1772,20 +1842,28 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                 // there too: the caller may disconnect the writers, which must not miss the confirmation of an add
                 Position terminatedPosition = lastConfirmedEntry;
                 try {
-                    executor.execute(() -> callback.terminateComplete(terminatedPosition, ctx));
+                    executor.execute(() -> terminationResult.complete(terminatedPosition));
                 } catch (RejectedExecutionException e) {
-                    callback.terminateComplete(terminatedPosition, ctx);
+                    terminationResult.complete(terminatedPosition);
                 }
             }
 
             @Override
             public void operationFailed(MetaStoreException e) {
+                if (!completed.compareAndSet(false, true)) {
+                    return;
+                }
                 metadataMutex.unlock();
                 log.error().exceptionMessage(e).log("Failed to terminate managed ledger");
                 handleBadVersion(e);
-                callback.terminateFailed(new ManagedLedgerException(e), ctx);
+                terminationResult.completeExceptionally(new ManagedLedgerException(e));
             }
-        });
+        };
+        try {
+            store.asyncUpdateLedgerIds(name, info, version, callback);
+        } catch (Throwable t) {
+            callback.operationFailed(new MetaStoreException(t));
+        }
     }
 
     @Override
