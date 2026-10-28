@@ -84,6 +84,90 @@ public class PatternTopicsConsumerImplTest extends ProducerConsumerBase {
         super.internalCleanup();
     }
 
+    @DataProvider
+    public Object[][] failedTopicSubscriptionScenarios() {
+        return new Object[][] {{false, false}, {true, false}, {true, true}};
+    }
+
+    @Test(timeOut = testTimeout, dataProvider = "failedTopicSubscriptionScenarios")
+    public void testRetryFailedTopicSubscription(boolean partitioned, boolean expand) throws Exception {
+        // Drive reconciliation explicitly, so the broker conflict and its removal have a fixed ordering.
+        boolean patternEvaluationEnabled = pulsar.getConfig().isEnableBrokerSideSubscriptionPatternEvaluation();
+        pulsar.getConfig().setEnableBrokerSideSubscriptionPatternEvaluation(false);
+        reconnectAllConnections();
+        String prefix = BrokerTestUtil.newUniqueName("persistent://my-property/my-ns/retry-pattern-");
+        String healthyTopic = prefix + "-healthy";
+        String addedTopic = prefix + "-added";
+        String subscription = "retry-subscription";
+        admin.topics().createNonPartitionedTopic(healthyTopic);
+        if (expand) {
+            admin.topics().createPartitionedTopic(addedTopic, 1);
+        }
+
+        try (Consumer<String> consumer = pulsarClient.newConsumer(Schema.STRING)
+                .topicsPattern(Pattern.compile(prefix + ".*"))
+                .patternAutoDiscoveryPeriod(1, TimeUnit.DAYS)
+                .subscriptionName(subscription)
+                .subscriptionType(SubscriptionType.Exclusive)
+                .subscribe()) {
+            PatternMultiTopicsConsumerImpl<String> patternConsumer = (PatternMultiTopicsConsumerImpl<String>) consumer;
+            ConsumerImpl<String> healthyConsumer = patternConsumer.consumers.get(healthyTopic);
+            ConsumerImpl<String> existingPartition = expand
+                    ? patternConsumer.consumers.get(addedTopic + "-partition-0") : null;
+            if (expand) {
+                admin.topics().updatePartitionedTopic(addedTopic, 2);
+            } else if (partitioned) {
+                admin.topics().createPartitionedTopic(addedTopic, 2);
+            } else {
+                admin.topics().createNonPartitionedTopic(addedTopic);
+            }
+            String blockedTopic = partitioned ? addedTopic + "-partition-1" : addedTopic;
+            // A real broker rejects the pattern consumer while this Exclusive consumer owns the subscription.
+            try (Consumer<String> blocker = pulsarClient.newConsumer(Schema.STRING)
+                    .topic(blockedTopic).subscriptionName(subscription).subscribe()) {
+                patternConsumer.recheckTopicsChange().get(10, TimeUnit.SECONDS);
+                assertThat(patternConsumer.consumers.get(healthyTopic)).isSameAs(healthyConsumer);
+                if (partitioned) {
+                    ConsumerImpl<String> successfulPartition =
+                            patternConsumer.consumers.get(addedTopic + "-partition-0");
+                    assertThat(successfulPartition).isNotNull();
+                    assertThat(successfulPartition.isConnected()).isTrue();
+                    if (expand) {
+                        assertThat(successfulPartition).isSameAs(existingPartition);
+                    }
+                    existingPartition = successfulPartition;
+                    assertPatternConsumerReceives(consumer, successfulPartition.getTopic());
+                }
+            }
+
+            // Once the conflict is gone, the same topic list must recreate the failed internal consumer.
+            patternConsumer.recheckTopicsChange().get(10, TimeUnit.SECONDS);
+            assertThat(patternConsumer.getConsumers()).hasSize(partitioned ? 3 : 2)
+                    .allSatisfy(child -> assertThat(child.isConnected()).as(child.getTopic()).isTrue());
+            assertThat(patternConsumer.allTopicPartitionsNumber.get()).isEqualTo(partitioned ? 3 : 2);
+            assertThat(patternConsumer.consumers.get(healthyTopic)).isSameAs(healthyConsumer);
+            if (partitioned) {
+                assertThat(patternConsumer.consumers.get(addedTopic + "-partition-0")).isSameAs(existingPartition);
+            }
+            for (String topic : patternConsumer.getPartitions()) {
+                assertPatternConsumerReceives(consumer, topic);
+            }
+        } finally {
+            pulsar.getConfig().setEnableBrokerSideSubscriptionPatternEvaluation(patternEvaluationEnabled);
+        }
+    }
+
+    private void assertPatternConsumerReceives(Consumer<String> consumer, String topic) throws Exception {
+        try (Producer<String> producer = pulsarClient.newProducer(Schema.STRING)
+                .topic(topic).enableBatching(false).create()) {
+            producer.send(topic);
+        }
+        Message<String> message = consumer.receive(10, TimeUnit.SECONDS);
+        assertThat(message).as("delivery from %s", topic).isNotNull();
+        assertThat(message.getValue()).isEqualTo(topic);
+        consumer.acknowledge(message);
+    }
+
     @Test(timeOut = testTimeout)
     public void testPatternTopicsSubscribeWithBuilderFail() throws Exception {
         String key = "PatternTopicsSubscribeWithBuilderFail";
