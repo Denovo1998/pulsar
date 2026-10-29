@@ -33,6 +33,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -61,6 +62,7 @@ import org.apache.bookkeeper.mledger.ManagedLedger;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerAlreadyClosedException;
+import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerFencedByAnotherWriterException;
 import org.apache.bookkeeper.mledger.ManagedLedgerException.ManagedLedgerTerminatedException;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactory;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactoryConfig;
@@ -75,6 +77,7 @@ import org.apache.pulsar.common.api.proto.CommandSubscribe.InitialPosition;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.PersistentOfflineTopicStats;
 import org.apache.pulsar.common.util.FutureUtil;
+import org.apache.pulsar.metadata.api.extended.SessionEvent;
 import org.awaitility.Awaitility;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -88,6 +91,118 @@ public class ManagedLedgerBkTest extends BookKeeperClusterTestCase {
         super(2);
         // Use the v2 wire protocol so that reads exercise the BookKeeper batch read API against real bookies
         baseClientConf.setUseV2WireProtocol(true);
+    }
+
+    @DataProvider
+    public Object[][] recheckSessionStates() {
+        return new Object[][] {{false}, {true}};
+    }
+
+    @Test(timeOut = 60000, dataProvider = "recheckSessionStates")
+    public void testRecheckCompletingBeforeQueuedSessionLossNotification(boolean sessionReestablished)
+            throws Exception {
+        @Cleanup("shutdown")
+        ManagedLedgerFactoryImpl factory = new ManagedLedgerFactoryImpl(metadataStore, bkc);
+        ManagedLedgerConfig config = defaultConfig()
+                .setEnsembleSize(2).setWriteQuorumSize(2).setAckQuorumSize(2);
+        ManagedLedgerImpl ledger = (ManagedLedgerImpl) factory.open(
+                "recheck-session-loss-" + UUID.randomUUID(), config);
+        ManagedCursor cursor = ledger.openCursor("c1");
+        ledger.addEntry("entry-1".getBytes(StandardCharsets.UTF_8));
+        LedgerHandle fencedLedger = ledger.currentLedger;
+        for (int i = 0; i < numBookies; i++) {
+            // Use the real bookie fencing operation, without closing the ledger in metadata.
+            serverByIndex(i).getBookie().fenceLedger(fencedLedger.getId(), fencedLedger.getLedgerKey())
+                    .get(10, TimeUnit.SECONDS);
+        }
+
+        CompletableFuture<Thread> worker = new CompletableFuture<>();
+        ledger.getExecutor().execute(() -> worker.complete(Thread.currentThread()));
+        Thread ledgerThread = worker.get(10, TimeUnit.SECONDS);
+        CountDownLatch startRecovery = new CountDownLatch(1);
+        CompletableFuture<Void> recoveryHeld = new CompletableFuture<>();
+        CompletableFuture<Position> add = new CompletableFuture<>();
+        boolean clusterStopped = false;
+        try {
+            // Hold BookKeeper's metadata scheduler so the real fenced write starts a pending recheck.
+            bkc.getClientCtx().getScheduler().chooseThread(ledger.getName()).execute(() -> {
+                recoveryHeld.complete(null);
+                awaitTestLatch(startRecovery);
+            });
+            recoveryHeld.get(10, TimeUnit.SECONDS);
+            metadataStore.triggerSessionEvent(SessionEvent.ConnectionLost);
+            ledger.asyncAddEntry("entry-2".getBytes(StandardCharsets.UTF_8), new AddEntryCallback() {
+                @Override
+                public void addComplete(Position position, ByteBuf entryData, Object ctx) {
+                    add.complete(position);
+                }
+
+                @Override
+                public void addFailed(ManagedLedgerException exception, Object ctx) {
+                    add.completeExceptionally(exception);
+                }
+            }, null);
+            Awaitility.await().until(ledger::isLedgerRecheckPending);
+
+            synchronized (ledger) {
+                startRecovery.countDown();
+                // Let real recovery finish, but hold its callback at the managed-ledger monitor. The session-loss
+                // notification will be queued behind that callback on the same worker.
+                Awaitility.await().until(() -> ledgerThread.getState() == Thread.State.BLOCKED
+                        && Arrays.stream(ledgerThread.getStackTrace()).anyMatch(frame ->
+                        frame.getClassName().equals(ManagedLedgerImpl.class.getName())
+                                && frame.getMethodName().startsWith(
+                                        "lambda$addEntryFailedDueToConcurrentlyModified$")));
+                if (!sessionReestablished) {
+                    // Recovery has finished. Make metadata unavailable for any replacement ledger.
+                    clusterStopped = true;
+                    zkUtil.stopCluster();
+                }
+                metadataStore.triggerSessionEvent(SessionEvent.SessionLost);
+                assertThat(factory.isMetadataSessionLost()).isTrue();
+                if (sessionReestablished) {
+                    metadataStore.triggerSessionEvent(SessionEvent.SessionReestablished);
+                }
+            }
+            CompletableFuture<Void> notificationHandled = new CompletableFuture<>();
+            ledger.getExecutor().execute(() -> notificationHandled.complete(null));
+            notificationHandled.get(10, TimeUnit.SECONDS);
+
+            if (sessionReestablished) {
+                assertThat(add.get(10, TimeUnit.SECONDS).getLedgerId()).isNotEqualTo(fencedLedger.getId());
+                assertThat(ledger.getState()).isEqualTo(ManagedLedgerImpl.State.LedgerOpened);
+                List<Entry> entries = cursor.readEntries(10);
+                try {
+                    assertThat(entries).hasSize(2);
+                    assertThat(entries.get(1).getData()).isEqualTo("entry-2".getBytes(StandardCharsets.UTF_8));
+                } finally {
+                    entries.forEach(Entry::release);
+                }
+            } else {
+                assertThat(add.isDone()).as("the pending add must fail without waiting for metadata recovery").isTrue();
+                assertThatThrownBy(() -> add.get(10, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(ManagedLedgerFencedByAnotherWriterException.class);
+                assertThat(ledger.getState()).isEqualTo(ManagedLedgerImpl.State.Fenced);
+                assertThat(ledger.currentLedger).isSameAs(fencedLedger);
+            }
+        } finally {
+            startRecovery.countDown();
+            if (clusterStopped) {
+                zkUtil.restartCluster();
+            }
+            metadataStore.triggerSessionEvent(SessionEvent.SessionReestablished);
+        }
+    }
+
+    private static void awaitTestLatch(CountDownLatch latch) {
+        try {
+            if (!latch.await(30, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out waiting to resume BookKeeper metadata work");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
     }
 
     @DataProvider
