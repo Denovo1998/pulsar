@@ -2321,6 +2321,12 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                             + " was lost");
             return;
         }
+        // The factory sets its session-loss flag before queuing the notification on this ledger's executor.
+        // A recovery callback already ahead of that notification must fence too, rather than start a new ledger.
+        if (errorCode == Code.LedgerFencedException && factory.isMetadataSessionLost()) {
+            fenceByAnotherWriter(currentLedger, errorCode);
+            return;
+        }
         ledgerRecheckHandle = null;
         if (rc == Code.OK) {
             log.info().attr("ledgerId", lh.getId())
