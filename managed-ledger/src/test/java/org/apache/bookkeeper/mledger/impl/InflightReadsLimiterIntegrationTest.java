@@ -33,14 +33,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import lombok.CustomLog;
+import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.LedgerHandle;
 import org.apache.bookkeeper.client.api.LedgerEntries;
+import org.apache.bookkeeper.client.api.OpenBuilder;
 import org.apache.bookkeeper.client.api.ReadHandle;
 import org.apache.bookkeeper.mledger.AsyncCallbacks;
 import org.apache.bookkeeper.mledger.Entry;
+import org.apache.bookkeeper.mledger.ManagedCursor;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.ManagedLedgerFactoryConfig;
+import org.apache.bookkeeper.mledger.Position;
 import org.apache.bookkeeper.mledger.PositionFactory;
 import org.apache.bookkeeper.mledger.impl.cache.EntryCache;
 import org.apache.bookkeeper.mledger.impl.cache.EntryCacheDisabled;
@@ -433,33 +437,60 @@ public class InflightReadsLimiterIntegrationTest extends MockedBookKeeperTestCas
         ManagedLedgerFactoryConfig factoryConfig = new ManagedLedgerFactoryConfig();
         factoryConfig.setMaxCacheSize(0);
         factoryConfig.setManagedLedgerMaxReadsInFlightSize(10_000);
-        ManagedLedgerFactoryImpl factory = new ManagedLedgerFactoryImpl(metadataStore, bkc, factoryConfig);
+        BookKeeper bookKeeper = Mockito.spy(bkc);
+        doAnswer(invocation -> {
+            OpenBuilder builder = Mockito.spy((OpenBuilder) invocation.callRealMethod());
+            doAnswer(openInvocation -> {
+                @SuppressWarnings("unchecked")
+                CompletableFuture<ReadHandle> opening =
+                        (CompletableFuture<ReadHandle>) openInvocation.callRealMethod();
+                return opening.thenApply(Mockito::spy);
+            }).when(builder).execute();
+            return builder;
+        }).when(bookKeeper).newOpenLedgerOp();
+        ManagedLedgerFactoryImpl factory = new ManagedLedgerFactoryImpl(metadataStore, bookKeeper, factoryConfig);
         try {
+            ManagedLedgerConfig config = defaultConfig().setMaxEntriesPerLedger(2).setRetentionTime(1, TimeUnit.HOURS)
+                    .setRetentionSizeInMB(-1);
+            config.setMinimumRolloverTime(0, TimeUnit.SECONDS);
             ManagedLedgerImpl ml = (ManagedLedgerImpl) factory.open("cache_disabled_limiter_single_entry_failure",
-                    defaultConfig());
-            ReadHandle readHandle = Mockito.mock(ReadHandle.class);
-            long ledgerId = ml.currentLedger.getId() + 1;
-            Mockito.when(readHandle.getId()).thenReturn(ledgerId);
-            Mockito.when(readHandle.readAsync(0, 0)).thenReturn(CompletableFuture.failedFuture(
-                    new ManagedLedgerException("Expected read failure")));
-            Mockito.when(readHandle.closeAsync()).thenReturn(CompletableFuture.completedFuture(null));
+                    config);
+            ManagedCursor cursor = ml.openCursor("c1");
+            Position position = ml.addEntry(new byte[] {1});
+            ml.addEntry(new byte[] {2});
+            ml.addEntry(new byte[] {3});
+            Assert.assertNotEquals(position.getLedgerId(), ml.currentLedger.getId());
+
+            cursor.readEntries(1).forEach(Entry::release);
+            CompletableFuture<ReadHandle> cachedHandle = ml.ledgerCache.get(position.getLedgerId());
+            Assert.assertNotNull(cachedHandle);
+            ReadHandle readHandle = cachedHandle.get(5, TimeUnit.SECONDS);
+            Assert.assertEquals(readHandle.getId(), position.getLedgerId());
+            Mockito.doReturn(CompletableFuture.failedFuture(
+                    new ManagedLedgerException("Expected read failure")))
+                    .when(readHandle).readUnconfirmedAsync(position.getEntryId(), position.getEntryId());
+            InflightReadsLimiter limiter = ((RangeEntryCacheManagerImpl) factory.getEntryCacheManager())
+                    .getInflightReadsLimiter();
+            long totalCapacity = limiter.getRemainingBytes();
             CompletableFuture<ManagedLedgerException> failure = new CompletableFuture<>();
 
-            ml.entryCache.asyncReadEntry(readHandle, PositionFactory.create(ledgerId, 0),
-                    new AsyncCallbacks.ReadEntryCallback() {
-                        @Override
-                        public void readEntryComplete(Entry entry, Object ctx) {
-                            failure.completeExceptionally(new AssertionError("Read should fail"));
-                        }
+            ml.asyncReadEntry(position, new AsyncCallbacks.ReadEntryCallback() {
+                @Override
+                public void readEntryComplete(Entry entry, Object ctx) {
+                    entry.release();
+                    failure.completeExceptionally(new AssertionError("Read should fail"));
+                }
 
-                        @Override
-                        public void readEntryFailed(ManagedLedgerException exception, Object ctx) {
-                            failure.complete(exception);
-                        }
-                    }, new Object());
+                @Override
+                public void readEntryFailed(ManagedLedgerException exception, Object ctx) {
+                    failure.complete(exception);
+                }
+            }, new Object());
 
-            Assert.assertEquals(failure.join().getMessage(), "Expected read failure");
+            Assert.assertEquals(failure.get(5, TimeUnit.SECONDS).getMessage(), "Expected read failure");
+            Assert.assertNull(ml.ledgerCache.get(position.getLedgerId()));
             Mockito.verify(readHandle).closeAsync();
+            Assert.assertEquals(limiter.getRemainingBytes(), totalCapacity);
         } finally {
             factory.shutdown();
         }
