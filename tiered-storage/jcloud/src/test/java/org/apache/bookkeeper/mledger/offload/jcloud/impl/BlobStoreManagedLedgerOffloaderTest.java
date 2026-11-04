@@ -29,6 +29,7 @@ import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 import java.io.IOException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -41,26 +42,42 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import lombok.Cleanup;
 import lombok.CustomLog;
 import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.api.LedgerEntries;
 import org.apache.bookkeeper.client.api.LedgerEntry;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.client.api.ReadHandle;
+import org.apache.bookkeeper.discover.RegistrationClient;
+import org.apache.bookkeeper.meta.MetadataClientDriver;
 import org.apache.bookkeeper.mledger.LedgerOffloader;
 import org.apache.bookkeeper.mledger.LedgerOffloaderStats;
+import org.apache.bookkeeper.mledger.ManagedLedger;
+import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.ManagedLedgerException;
 import org.apache.bookkeeper.mledger.OffloadedLedgerMetadata;
 import org.apache.bookkeeper.mledger.impl.LedgerOffloaderStatsImpl;
+import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
 import org.apache.bookkeeper.mledger.offload.jcloud.provider.JCloudBlobStoreProvider;
 import org.apache.bookkeeper.mledger.offload.jcloud.provider.TieredStorageConfiguration;
+import org.apache.bookkeeper.versioning.LongVersion;
+import org.apache.bookkeeper.versioning.Versioned;
 import org.apache.pulsar.common.naming.TopicName;
+import org.apache.pulsar.common.policies.data.ManagedLedgerInternalStats;
+import org.apache.pulsar.common.policies.data.OffloadPoliciesImpl;
+import org.apache.pulsar.common.policies.data.OffloadedReadPriority;
+import org.apache.pulsar.metadata.api.MetadataStoreConfig;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
+import org.awaitility.Awaitility;
 import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.options.CopyOptions;
 import org.mockito.Mockito;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 import org.testng.collections.Maps;
 
@@ -118,6 +135,96 @@ public class BlobStoreManagedLedgerOffloaderTest extends BlobStoreManagedLedgerO
         @Cleanup
         LedgerOffloader offloader = getOffloader();
         offloader.offload(buildReadHandle(), UUID.randomUUID(), new HashMap<>()).get();
+    }
+
+    @DataProvider
+    public Object[][] internalStatsReadPriorities() {
+        return new Object[][] {
+                {OffloadedReadPriority.BOOKKEEPER_FIRST, false},
+                {OffloadedReadPriority.BOOKKEEPER_FIRST, true},
+                {OffloadedReadPriority.TIERED_STORAGE_FIRST, false},
+                {OffloadedReadPriority.TIERED_STORAGE_FIRST, true}
+        };
+    }
+
+    @Test(timeOut = 60000, dataProvider = "internalStatsReadPriorities")
+    public void testInternalStatsAfterOffloadWithUnavailableBookies(OffloadedReadPriority readPriority,
+                                                                  boolean terminate) throws Exception {
+        @Cleanup
+        LedgerOffloader offloader = getOffloader();
+        OffloadPoliciesImpl policies = (OffloadPoliciesImpl) offloader.getOffloadPolicies();
+        policies.setManagedLedgerOffloadedReadPriority(readPriority);
+        policies.setManagedLedgerOffloadDeletionLagInMillis(TimeUnit.MINUTES.toMillis(5));
+        Clock clock = mock(Clock.class);
+        Mockito.doReturn(1_000_000L).when(clock).millis();
+        @Cleanup
+        MetadataStoreExtended metadataStore = MetadataStoreExtended.create("memory:local",
+                MetadataStoreConfig.builder().metadataStoreName("offload-internal-stats").build());
+
+        BookKeeper bookKeeper = Mockito.spy(bk);
+        MetadataClientDriver metadataDriver = Mockito.spy(bk.getMetadataClientDriver());
+        RegistrationClient registrationClient = Mockito.spy(metadataDriver.getRegistrationClient());
+        Mockito.doReturn(metadataDriver).when(bookKeeper).getMetadataClientDriver();
+        Mockito.doReturn(registrationClient).when(metadataDriver).getRegistrationClient();
+
+        @Cleanup("shutdown")
+        ManagedLedgerFactoryImpl factory = new ManagedLedgerFactoryImpl(metadataStore, bookKeeper);
+        ManagedLedgerConfig ledgerConfig = new ManagedLedgerConfig();
+        ledgerConfig.setMaxEntriesPerLedger(2);
+        ledgerConfig.setMinimumRolloverTime(0, TimeUnit.SECONDS);
+        ledgerConfig.setRetentionTime(-1, TimeUnit.SECONDS);
+        ledgerConfig.setRetentionSizeInMB(-1);
+        ledgerConfig.setLedgerOffloader(offloader);
+        ledgerConfig.setClock(clock);
+        @Cleanup
+        ManagedLedger ledger = factory.open("public/default/persistent/offload-internal-stats", ledgerConfig);
+        ledger.addEntry(new byte[] {1});
+        ledger.addEntry(new byte[] {2});
+        ledger.addEntry(new byte[] {3});
+        if (terminate) {
+            ledger.terminate();
+        }
+        ledger.offloadPrefix(ledger.getLastConfirmedEntry());
+
+        ManagedLedgerInternalStats healthyStats = ledger.getManagedLedgerInternalStats(true).get();
+        assertEquals(healthyStats.ledgers.size(), 2);
+        assertTrue(healthyStats.ledgers.get(0).offloaded);
+        Assert.assertFalse(healthyStats.ledgers.get(0).underReplicated);
+        assertEquals(healthyStats.ledgers.get(1).offloaded, terminate);
+        Assert.assertFalse(healthyStats.ledgers.get(1).underReplicated);
+
+        // Offloaded ledgers must still report missing bookies while their read handles use BookKeeper.
+        Mockito.doReturn(CompletableFuture.completedFuture(new Versioned<>(Collections.emptySet(), new LongVersion(1))))
+                .when(registrationClient).getWritableBookies();
+        boolean readsFromBookKeeper = readPriority == OffloadedReadPriority.BOOKKEEPER_FIRST;
+        ManagedLedgerInternalStats stats = ledger.getManagedLedgerInternalStats(true).get();
+        assertEquals(stats.ledgers.get(0).underReplicated, readsFromBookKeeper);
+        assertEquals(stats.ledgers.get(1).underReplicated, !terminate || readsFromBookKeeper);
+
+        // A policy change does not replace an already cached read handle.
+        policies.setManagedLedgerOffloadedReadPriority(readsFromBookKeeper
+                ? OffloadedReadPriority.TIERED_STORAGE_FIRST : OffloadedReadPriority.BOOKKEEPER_FIRST);
+        stats = ledger.getManagedLedgerInternalStats(true).get();
+        assertEquals(stats.ledgers.get(0).underReplicated, readsFromBookKeeper);
+        assertEquals(stats.ledgers.get(1).underReplicated, !terminate || readsFromBookKeeper);
+
+        // Exercise the real deletion path, which invalidates cached BookKeeper handles before reopening from offload.
+        policies.setManagedLedgerOffloadedReadPriority(OffloadedReadPriority.BOOKKEEPER_FIRST);
+        Mockito.doReturn(1_000_000L + TimeUnit.MINUTES.toMillis(6)).when(clock).millis();
+        CompletableFuture<Void> trimmed = new CompletableFuture<>();
+        ledger.trimConsumedLedgersInBackground(trimmed);
+        trimmed.get(10, TimeUnit.SECONDS);
+        Awaitility.await().untilAsserted(() -> {
+            for (ManagedLedgerInternalStats.LedgerInfo info : healthyStats.ledgers) {
+                if (info.offloaded) {
+                    assertTrue(ledger.getLedgersInfo().get(info.ledgerId).getOffloadContext().isBookkeeperDeleted());
+                    Assert.assertFalse(bk.getLedgerMap().containsKey(info.ledgerId));
+                }
+            }
+        });
+        stats = ledger.getManagedLedgerInternalStats(true).get();
+        Assert.assertFalse(stats.ledgers.get(0).underReplicated);
+        assertEquals(stats.ledgers.get(1).underReplicated, !terminate);
     }
 
     @Test(timeOut = 600000)  // 10 minutes.

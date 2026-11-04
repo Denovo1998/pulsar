@@ -2682,7 +2682,7 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
 
     public CompletableFuture<LedgerMetadata> getLedgerMetadata(long ledgerId) {
         LedgerHandle currentLedger = this.currentLedger;
-        if (currentLedger != null && ledgerId == currentLedger.getId()) {
+        if (isReadFromCurrentLedger(currentLedger, ledgerId)) {
             return CompletableFuture.completedFuture(currentLedger.getLedgerMetadata());
         } else {
             return getLedgerHandle(ledgerId).thenApply(rh -> rh.getLedgerMetadata());
@@ -5966,10 +5966,11 @@ public class ManagedLedgerImpl implements ManagedLedger, CreateCallback {
                                 info.underReplicated = false;
                             } else {
                                 info.metadata = lm.toSafeString();
-                                Set<BookieId> ensemble = lm.getAllEnsembles().values().stream()
-                                    .flatMap(Collection::stream)
-                                    .collect(Collectors.toSet());
-                                if (bookies != null) {
+                                // Only skip the ensemble check when the opened read handle uses tiered storage.
+                                if (bookies != null && !isReadFromOffloadedLedgerHandle(li.getLedgerId())) {
+                                    Set<BookieId> ensemble = lm.getAllEnsembles().values().stream()
+                                        .flatMap(Collection::stream)
+                                        .collect(Collectors.toSet());
                                     info.underReplicated = !bookies.containsAll(ensemble);
                                 }
                             }
