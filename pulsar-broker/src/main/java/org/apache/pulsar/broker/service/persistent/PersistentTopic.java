@@ -5600,7 +5600,9 @@ public class PersistentTopic extends AbstractTopic implements Topic, AddEntryCal
         // The component "EntryFilters" is update in the method "updateTopicPolicy(data)".
         //   see more detail: https://github.com/apache/pulsar/pull/19364.
         updateTopicPolicy(policies);
-        shadowTopics = policies.getShadowTopics();
+        if (!policies.isGlobalPolicies()) {
+            shadowTopics = policies.getShadowTopics();
+        }
         checkReplicatedSubscriptionControllerState();
 
         // Apply policies for components(not contains the specified policies which only defined in namespace policies).

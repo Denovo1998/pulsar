@@ -19,19 +19,28 @@
 package org.apache.pulsar.broker.service;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import lombok.CustomLog;
+import org.apache.commons.lang3.reflect.MethodUtils;
 import org.apache.pulsar.broker.PulsarService;
 import org.apache.pulsar.broker.namespace.NamespaceService;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.TopicPolicies;
+import org.apache.pulsar.common.util.Backoff;
 import org.apache.pulsar.common.util.Codec;
 import org.apache.pulsar.common.util.FutureUtil;
 import org.apache.pulsar.metadata.api.MetadataCache;
@@ -39,6 +48,8 @@ import org.apache.pulsar.metadata.api.MetadataStore;
 import org.apache.pulsar.metadata.api.MetadataStoreException.NotFoundException;
 import org.apache.pulsar.metadata.api.Notification;
 import org.apache.pulsar.metadata.api.NotificationType;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
+import org.apache.pulsar.metadata.api.extended.SessionEvent;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -50,23 +61,32 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
     public static final String GLOBAL_POLICIES_ROOT = "/admin/topic-policies/global";
     public static final String LOCAL_POLICIES_ROOT = "/admin/topic-policies/local";
 
+    private static final int RECOVERY_BATCH_SIZE = 32;
+
+    // An existing custom backend may implement only the deprecated registration hook.
+    private final boolean overridesLegacyRegistration = getClass() != MetadataStoreTopicPoliciesService.class
+            && MethodUtils.getMatchingMethod(getClass(), "registerListener", TopicName.class, TopicPolicyListener.class)
+                    .getDeclaringClass() != MetadataStoreTopicPoliciesService.class;
+    private final CompletableFuture<Void> started = new CompletableFuture<>();
     private final AtomicBoolean closed = new AtomicBoolean(false);
-    private final Map<TopicName, List<TopicPolicyListener>> listeners = new ConcurrentHashMap<>();
-    private MetadataCache<TopicPolicies> localPoliciesCache;
-    private MetadataCache<TopicPolicies> globalPoliciesCache;
-    private volatile Runnable cancelLocalStoreListener;
-    private volatile Runnable cancelConfigurationStoreListener;
+    private final Map<TopicName, TopicListeners> listeners = new ConcurrentHashMap<>();
+    private PolicyStore local;
+    private PolicyStore global;
+    private PulsarService pulsar;
 
     @Override
-    public void start(PulsarService pulsar) {
+    public synchronized void start(PulsarService pulsar) {
+        if (closed.get() || started.isDone()) {
+            return;
+        }
+        this.pulsar = pulsar;
         MetadataStore localStore = pulsar.getLocalMetadataStore();
         MetadataStore configurationStore = pulsar.getConfigurationMetadataStore();
-        this.localPoliciesCache = localStore.getMetadataCache(TopicPolicies.class);
-        this.globalPoliciesCache = configurationStore.getMetadataCache(TopicPolicies.class);
-        cancelLocalStoreListener =
-                localStore.registerCancellableListener(notification -> handleNotification(notification, false));
-        cancelConfigurationStoreListener =
-                configurationStore.registerCancellableListener(notification -> handleNotification(notification, true));
+        local = new PolicyStore(localStore, false);
+        global = new PolicyStore(configurationStore, true);
+        local.listen(localStore);
+        global.listen(configurationStore);
+        started.complete(null);
     }
 
     @Override
@@ -85,12 +105,12 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
             return CompletableFuture.failedFuture(new BrokerServiceException(getClass().getName() + " is closed."));
         }
         CompletableFuture<Void> deleteLocal =
-                deleteIfExists(localPoliciesCache, pathFor(partitionedTopicName, false));
+                deleteIfExists(local.cache, pathFor(partitionedTopicName, false));
         if (keepGlobalPoliciesAfterDeleting) {
             return deleteLocal;
         }
         CompletableFuture<Void> deleteGlobal =
-                deleteIfExists(globalPoliciesCache, pathFor(partitionedTopicName, true));
+                deleteIfExists(global.cache, pathFor(partitionedTopicName, true));
         return CompletableFuture.allOf(deleteLocal, deleteGlobal);
     }
 
@@ -142,45 +162,86 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
     @Deprecated
     @Override
     public boolean registerListener(TopicName topicName, TopicPolicyListener listener) {
-        listeners.compute(normalizeTopicName(topicName), (__, topicListeners) -> {
-            if (topicListeners == null) {
-                topicListeners = new CopyOnWriteArrayList<>();
-            }
-            topicListeners.add(listener);
-            return topicListeners;
-        });
+        if (closed.get()) {
+            return false;
+        }
+        addListener(topicName, listener);
         return true;
     }
 
     @Override
+    public CompletableFuture<Boolean> registerListenerAsync(TopicName topicName, TopicPolicyListener listener) {
+        if (overridesLegacyRegistration) {
+            return TopicPoliciesService.super.registerListenerAsync(topicName, listener);
+        }
+        return addListener(topicName, listener);
+    }
+
+    private CompletableFuture<Boolean> addListener(TopicName topicName, TopicPolicyListener listener) {
+        if (closed.get()) {
+            return CompletableFuture.completedFuture(false);
+        }
+        TopicName topic = normalizeTopicName(topicName);
+        ListenerRegistration registration = new ListenerRegistration(topic, listener);
+        TopicListeners registered = listeners.compute(topic, (__, current) -> {
+            if (closed.get()) {
+                return current;
+            }
+            if (current == null) {
+                current = new TopicListeners();
+            }
+            current.entries.add(registration);
+            return current;
+        });
+        if (closed.get() || registered == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+        if (registration.published != null) {
+            // Watches must see the registration before its first presence check can reach the store.
+            FutureUtil.completeAfter(registration.published, started);
+        }
+        registration.ready.whenComplete((__, error) -> {
+            if (error != null) {
+                removeListener(topic, entry -> entry == registration);
+            }
+        });
+        return registration.ready;
+    }
+
+    @Override
     public void unregisterListener(TopicName topicName, TopicPolicyListener listener) {
-        listeners.computeIfPresent(normalizeTopicName(topicName), (__, topicListeners) -> {
-            topicListeners.remove(listener);
-            return topicListeners.isEmpty() ? null : topicListeners;
+        removeListener(normalizeTopicName(topicName), entry -> entry.listener.equals(listener));
+    }
+
+    private void removeListener(TopicName topic, Predicate<ListenerRegistration> match) {
+        listeners.computeIfPresent(topic, (__, current) -> {
+            for (ListenerRegistration entry : current.entries) {
+                if (match.test(entry)) {
+                    entry.active = false;
+                    current.entries.remove(entry);
+                    break;
+                }
+            }
+            return current.entries.isEmpty() ? null : current;
         });
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (closed.compareAndSet(false, true)) {
-            if (cancelLocalStoreListener != null) {
-                cancelLocalStoreListener.run();
+            started.completeExceptionally(new IllegalStateException("Topic policies service closed before startup"));
+            if (local != null) {
+                local.close();
             }
-            if (cancelConfigurationStoreListener != null) {
-                cancelConfigurationStoreListener.run();
+            if (global != null) {
+                global.close();
             }
             listeners.clear();
-            if (localPoliciesCache != null) {
-                localPoliciesCache.invalidateAll();
-            }
-            if (globalPoliciesCache != null) {
-                globalPoliciesCache.invalidateAll();
-            }
         }
     }
 
     private MetadataCache<TopicPolicies> cache(boolean isGlobalPolicy) {
-        return isGlobalPolicy ? globalPoliciesCache : localPoliciesCache;
+        return isGlobalPolicy ? global.cache : local.cache;
     }
 
     private CompletableFuture<Void> deleteIfExists(MetadataCache<TopicPolicies> cache, String path) {
@@ -202,49 +263,172 @@ public class MetadataStoreTopicPoliciesService implements TopicPoliciesService {
         return policies;
     }
 
-    private void handleNotification(Notification notification, boolean isGlobalPolicy) {
-        if (closed.get()
-                || (notification.getType() != NotificationType.Created
-                && notification.getType() != NotificationType.Modified
-                && notification.getType() != NotificationType.Deleted)) {
-            return;
-        }
-        String path = notification.getPath();
-        String root = isGlobalPolicy ? GLOBAL_POLICIES_ROOT : LOCAL_POLICIES_ROOT;
-        Optional<TopicName> topicName = topicNameFromPath(root, path);
-        if (topicName.isEmpty()) {
-            return;
-        }
-        MetadataCache<TopicPolicies> cache = cache(isGlobalPolicy);
-        cache.invalidate(path);
-        if (notification.getType() == NotificationType.Deleted) {
-            notifyListeners(topicName.get(), null);
-            return;
-        }
-        cache.get(path).whenComplete((policies, error) -> {
-            if (error != null) {
-                log.warn()
-                        .attr("path", path)
-                        .exception(error)
-                        .log("Failed to refresh topic policies after metadata notification");
-                return;
-            }
-            notifyListeners(topicName.get(),
-                    policies.map(policy -> cloneWithScope(policy, isGlobalPolicy)).orElse(null));
-        });
+    private static final class TopicListeners {
+        private final List<ListenerRegistration> entries = new CopyOnWriteArrayList<>();
+        // A read for a previously unloaded topic cannot supersede a read for its replacement.
+        private final AtomicReference<Object> localRequest = new AtomicReference<>();
+        private final AtomicReference<Object> globalRequest = new AtomicReference<>();
     }
 
-    private void notifyListeners(TopicName topicName, @Nullable TopicPolicies policies) {
-        List<TopicPolicyListener> topicListeners = listeners.get(topicName);
-        if (topicListeners == null) {
-            return;
-        }
-        for (TopicPolicyListener listener : topicListeners) {
-            try {
-                listener.onUpdate(policies == null ? null : policies.clone());
-            } catch (Throwable error) {
-                log.error().attr("topic", topicName).exception(error).log("Call topic policy listener error");
+    private final class ListenerRegistration {
+        private final TopicPolicyListener listener;
+        private final CompletableFuture<Void> published;
+        private final CompletableFuture<Boolean> ready;
+        private volatile boolean active = true;
+        // Only legacy listeners need presence history. Updates to these futures and all their
+        // successful continuations run on the topic's notification thread.
+        private CompletableFuture<Boolean> localPresent;
+        private CompletableFuture<Boolean> globalPresent;
+
+        ListenerRegistration(TopicName topic, TopicPolicyListener listener) {
+            this.listener = listener;
+            if (listener instanceof TopicPolicyListener.Scoped) {
+                published = null;
+                ready = CompletableFuture.completedFuture(true);
+            } else {
+                published = new CompletableFuture<>();
+                Executor executor = task -> pulsar.getBrokerService().getTopicPoliciesNotifyThread(topic).execute(task);
+                localPresent = initialPresence(topic, false, executor);
+                globalPresent = initialPresence(topic, true, executor);
+                ready = localPresent.thenCombine(globalPresent, (localExists, globalExists) -> true);
             }
+        }
+
+        private CompletableFuture<Boolean> initialPresence(TopicName topic, boolean global, Executor executor) {
+            // Check existence without warming the policy value cache or retaining the policy itself.
+            return published.thenCompose(__ -> cache(global).exists(pathFor(topic, global)))
+                    .thenApplyAsync(Function.identity(), executor);
+        }
+
+        void notifyPolicy(TopicName topic, boolean global, Optional<TopicPolicies> policies, boolean deleted) {
+            if (listener instanceof TopicPolicyListener.Scoped) {
+                deliver(topic, global, policies, deleted);
+                return;
+            }
+            var previous = global ? globalPresent : localPresent;
+            var next = previous.thenApply(present -> {
+                deliver(topic, global, policies, deleted || present);
+                return policies.isPresent();
+            });
+            if (global) {
+                globalPresent = next;
+            } else {
+                localPresent = next;
+            }
+        }
+
+        private void deliver(TopicName topic, boolean global, Optional<TopicPolicies> policies, boolean removed) {
+            if (active && !closed.get()) {
+                try {
+                    if (policies.isPresent()) {
+                        listener.onUpdate(policies.get().clone());
+                    } else if (listener instanceof TopicPolicyListener.Scoped scoped) {
+                        scoped.onPolicyAbsent(global);
+                    } else if (removed) {
+                        listener.onUpdate(null);
+                    }
+                } catch (Throwable error) {
+                    log.error().attr("topic", topic).exception(error).log("Call topic policy listener error");
+                }
+            }
+        }
+    }
+
+    private final class PolicyStore {
+        private final boolean globalPolicy;
+        private final MetadataCache<TopicPolicies> cache;
+        private final FutureUtil.Sequencer<Void> recovery = FutureUtil.Sequencer.create();
+        private final AtomicBoolean replayQueued = new AtomicBoolean();
+        private Runnable cancelNotifications;
+        private Runnable cancelSessionListener;
+
+        PolicyStore(MetadataStore store, boolean globalPolicy) {
+            this.globalPolicy = globalPolicy;
+            cache = store.getMetadataCache(TopicPolicies.class);
+        }
+
+        private void listen(MetadataStore store) {
+            cancelNotifications = store.registerCancellableListener(this::handleNotification);
+            if (store instanceof MetadataStoreExtended extended) {
+                cancelSessionListener = extended.registerCancellableSessionListener(this::handleSessionEvent);
+            }
+        }
+
+        private void handleSessionEvent(SessionEvent event) {
+            if (event.isConnected() && !closed.get() && replayQueued.compareAndSet(false, true)) {
+                recovery.sequential(() -> {
+                    // A reconnect during this scan needs another pass, even for topics already visited.
+                    replayQueued.set(false);
+                    var topics = new ArrayList<>(listeners.keySet());
+                    CompletableFuture<Void> scan = CompletableFuture.completedFuture(null);
+                    for (List<TopicName> batch : Lists.partition(topics, RECOVERY_BATCH_SIZE)) {
+                        scan = scan.thenCompose(__ -> FutureUtil.waitForAll(
+                                batch.stream().map(topic -> refresh(topic, false, null)).toList()));
+                    }
+                    return scan;
+                });
+            }
+        }
+
+        private void handleNotification(Notification notification) {
+            if (closed.get() || (notification.getType() != NotificationType.Created
+                    && notification.getType() != NotificationType.Modified
+                    && notification.getType() != NotificationType.Deleted)) {
+                return;
+            }
+            String root = globalPolicy ? GLOBAL_POLICIES_ROOT : LOCAL_POLICIES_ROOT;
+            boolean deleted = notification.getType() == NotificationType.Deleted;
+            topicNameFromPath(root, notification.getPath()).ifPresent(topic -> refresh(topic, deleted, null));
+        }
+
+        private CompletableFuture<Void> refresh(TopicName topic, boolean deleted, @Nullable Backoff retry) {
+            if (closed.get()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            String path = pathFor(topic, globalPolicy);
+            cache.invalidate(path);
+            TopicListeners topicListeners = listeners.get(topic);
+            if (topicListeners == null) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            var pending = globalPolicy ? topicListeners.globalRequest : topicListeners.localRequest;
+            Object request = new Object();
+            pending.set(request);
+            // A partition loaded while this read is in flight obtains its own initial policy.
+            var recipients = topicListeners.entries.iterator();
+            GetType type = globalPolicy ? GetType.GLOBAL_ONLY : GetType.LOCAL_ONLY;
+            return getTopicPoliciesAsync(topic, type).handleAsync((policies, error) -> {
+                // Only the latest read can notify or schedule a retry for this scope.
+                if (closed.get() || listeners.get(topic) != topicListeners) {
+                    pending.compareAndSet(request, null);
+                } else if (error == null) {
+                    if (pending.compareAndSet(request, null)) {
+                        recipients.forEachRemaining(entry ->
+                                entry.notifyPolicy(topic, globalPolicy, policies, deleted));
+                    }
+                } else if (pending.get() == request) {
+                    log.warn().attr("path", path).exception(error).log("Failed to refresh topic policies");
+                    Backoff backoff = retry != null ? retry : Backoff.builder().build();
+                    pulsar.getExecutor().schedule(() -> recovery.sequential(() -> {
+                        if (pending.compareAndSet(request, null) && listeners.get(topic) == topicListeners) {
+                            return refresh(topic, deleted, backoff);
+                        }
+                        return CompletableFuture.completedFuture(null);
+                    }), backoff.next().toMillis(), TimeUnit.MILLISECONDS);
+                }
+                return null;
+            }, pulsar.getBrokerService().getTopicPoliciesNotifyThread(topic));
+        }
+
+        private void close() {
+            if (cancelNotifications != null) {
+                cancelNotifications.run();
+            }
+            if (cancelSessionListener != null) {
+                cancelSessionListener.run();
+            }
+            cache.close();
         }
     }
 

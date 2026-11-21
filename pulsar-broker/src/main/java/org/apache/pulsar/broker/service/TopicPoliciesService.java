@@ -109,10 +109,10 @@ public interface TopicPoliciesService extends AutoCloseable {
      * Registers a listener for topic policies updates.
      *
      * <p>
-     * The listener will receive the latest topic policies when they are updated. If the policies are removed, the
-     * listener will receive a null value. Note that not every update is guaranteed to trigger the listener. For
-     * instance, if the policies change from A -> B -> null -> C in quick succession, only the final state (C) is
-     * guaranteed to be received by the listener.
+     * The listener will receive the latest topic policies when they are updated, and null when they are removed.
+     * A {@link TopicPolicyListener.Scoped} can also reconcile an empty scope on metadata-store reconnect.
+     * Not every update is guaranteed to trigger the listener. For instance, if the policies change from
+     * A -> B -> null -> C in quick succession, only the final state (C) is guaranteed to be received.
      * In summary, the listener is guaranteed to receive only the latest value.
      * </p>
      */

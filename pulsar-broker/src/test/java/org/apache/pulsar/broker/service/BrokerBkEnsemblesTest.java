@@ -19,6 +19,8 @@
 package org.apache.pulsar.broker.service;
 
 import static org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest.retryStrategically;
+import static org.apache.pulsar.metadata.impl.ZKMetadataStoreTest.withDisconnectedSession;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertNotNull;
@@ -38,6 +40,7 @@ import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import lombok.Cleanup;
@@ -46,6 +49,7 @@ import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.LedgerHandle;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.concurrent.FutureUtils;
 import org.apache.bookkeeper.mledger.ManagedLedgerConfig;
 import org.apache.bookkeeper.mledger.impl.ManagedCursorImpl;
 import org.apache.bookkeeper.mledger.impl.ManagedLedgerFactoryImpl;
@@ -64,9 +68,15 @@ import org.apache.pulsar.client.api.Producer;
 import org.apache.pulsar.client.api.PulsarClient;
 import org.apache.pulsar.client.api.Schema;
 import org.apache.pulsar.client.api.SubscriptionInitialPosition;
+import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.ManagedLedgerInternalStats;
 import org.apache.pulsar.common.policies.data.TenantInfoImpl;
+import org.apache.pulsar.common.policies.data.TopicPolicies;
 import org.apache.pulsar.common.util.netty.EventLoopUtil;
+import org.apache.pulsar.metadata.api.MetadataStore;
+import org.apache.pulsar.metadata.api.MetadataStoreConfig;
+import org.apache.pulsar.metadata.api.MetadataStoreFactory;
+import org.apache.pulsar.metadata.api.NotificationType;
 import org.apache.zookeeper.ZooKeeper;
 import org.awaitility.Awaitility;
 import org.testng.Assert;
@@ -83,6 +93,76 @@ public class BrokerBkEnsemblesTest extends BkEnsemblesTestBase {
 
     public BrokerBkEnsemblesTest(int numberOfBookies) {
         super(numberOfBookies);
+    }
+
+    @Test
+    public void testTopicPoliciesRecoverBothScopesOnSharedStore() throws Exception {
+        assertThat(pulsar.getConfigurationMetadataStore()).isSameAs(pulsar.getLocalMetadataStore());
+        TopicName name = TopicName.get("persistent://prop/ns/shared-policy-store");
+        String url = config.getMetadataStoreUrl();
+        try (MetadataStore writer = MetadataStoreFactory.create(url, MetadataStoreConfig.builder().build());
+             var service = new MetadataStoreTopicPoliciesService()) {
+            service.start(pulsar);
+            var cache = writer.getMetadataCache(TopicPolicies.class);
+            var updates = new CopyOnWriteArrayList<TopicPolicies>();
+            service.registerListenerAsync(name, updates::add).get(10, TimeUnit.SECONDS);
+            TopicPolicies local = TopicPolicies.builder().messageTTLInSeconds(20).build();
+            TopicPolicies global = TopicPolicies.builder().isGlobal(true).messageTTLInSeconds(60).build();
+            var query = new CompletableFuture<Optional<TopicPolicies>>();
+            withDisconnectedSession(pulsar.getLocalMetadataStore(), url, false, () -> {
+                cache.create(MetadataStoreTopicPoliciesService.pathFor(name, false), local).get(10, TimeUnit.SECONDS);
+                cache.create(MetadataStoreTopicPoliciesService.pathFor(name, true), global).get(10, TimeUnit.SECONDS);
+                // A cold read must wait for ZooKeeper even if there is no local cache entry yet.
+                var pending = service.getTopicPoliciesAsync(name, TopicPoliciesService.GetType.LOCAL_ONLY);
+                assertThat(pending).isNotDone();
+                FutureUtils.proxyTo(pending, query);
+            });
+            assertThat(query.get(10, TimeUnit.SECONDS)).contains(local);
+            Awaitility.await().untilAsserted(() -> assertThat(updates).containsExactlyInAnyOrder(local, global));
+        }
+    }
+
+    @Test
+    public void testReadDuringPolicyUpdateOnSharedStore() throws Exception {
+        TopicName name = TopicName.get("persistent://prop/ns/updated-policy");
+        String path = MetadataStoreTopicPoliciesService.pathFor(name, false);
+        var store = pulsar.getLocalMetadataStore();
+        assertThat(pulsar.getConfigurationMetadataStore()).isSameAs(store);
+        try (var service = new MetadataStoreTopicPoliciesService();
+             MetadataStore writer = MetadataStoreFactory.create(config.getMetadataStoreUrl(),
+                     MetadataStoreConfig.builder().build())) {
+            service.start(pulsar);
+            var cache = writer.getMetadataCache(TopicPolicies.class);
+            var local = TopicPolicies.builder().messageTTLInSeconds(10).build();
+            var updated = TopicPolicies.builder().messageTTLInSeconds(20).build();
+            var observed = new CopyOnWriteArrayList<TopicPolicies>();
+            service.registerListenerAsync(name, observed::add).get(10, TimeUnit.SECONDS);
+            cache.create(path, local).get(10, TimeUnit.SECONDS);
+            Awaitility.await().untilAsserted(() -> assertThat(observed).containsExactly(local));
+            assertThat(service.getTopicPoliciesAsync(name, TopicPoliciesService.GetType.LOCAL_ONLY)
+                    .get(10, TimeUnit.SECONDS)).contains(local);
+
+            // ZooKeeper's watch listeners and read completions run on the same metadata event thread.
+            // This listener runs after policy invalidation, before the outstanding read can complete.
+            var query = new CompletableFuture<Optional<TopicPolicies>>();
+            Runnable unregister = store.registerCancellableListener(event -> {
+                if (event.getType() == NotificationType.Modified && path.equals(event.getPath())) {
+                    var pending = service.getTopicPoliciesAsync(name, TopicPoliciesService.GetType.LOCAL_ONLY);
+                    if (pending.isDone()) {
+                        query.completeExceptionally(new AssertionError("Expected an outstanding policy read"));
+                    } else {
+                        FutureUtils.proxyTo(pending, query);
+                    }
+                }
+            });
+            try {
+                cache.readModifyUpdate(path, __ -> updated).get(10, TimeUnit.SECONDS);
+                assertThat(query.get(10, TimeUnit.SECONDS)).contains(updated);
+                Awaitility.await().untilAsserted(() -> assertThat(observed).containsExactly(local, updated));
+            } finally {
+                unregister.run();
+            }
+        }
     }
 
     /**

@@ -112,6 +112,7 @@ import org.apache.pulsar.broker.rest.Topics;
 import org.apache.pulsar.broker.service.BrokerService;
 import org.apache.pulsar.broker.service.HealthChecker;
 import org.apache.pulsar.broker.service.LegacyAwareTopicPoliciesService;
+import org.apache.pulsar.broker.service.MetadataStoreTopicPoliciesService;
 import org.apache.pulsar.broker.service.PulsarMetadataEventSynchronizer;
 import org.apache.pulsar.broker.service.SystemTopicBasedTopicPoliciesService;
 import org.apache.pulsar.broker.service.Topic;
@@ -470,7 +471,21 @@ public class PulsarService implements AutoCloseable, ShutdownService {
                         .openTelemetry(openTelemetry)
                         .nodeSizeStats(new DefaultMetadataNodeSizeStats())
                         .numSerDesThreads(config.getMetadataStoreSerDesThreads())
-                        .build());
+                        .build(), usesMetadataStoreTopicPolicies());
+    }
+
+    private boolean usesMetadataStoreTopicPolicies() throws MetadataStoreException {
+        String className = config.getTopicPoliciesServiceClassName();
+        if (!config.isTopicLevelPoliciesEnabled() || className == null
+                || SystemTopicBasedTopicPoliciesService.class.getName().equals(className)) {
+            return false;
+        }
+        try {
+            return MetadataStoreTopicPoliciesService.class.isAssignableFrom(
+                    Class.forName(className, false, Thread.currentThread().getContextClassLoader()));
+        } catch (ClassNotFoundException e) {
+            throw new MetadataStoreException("Failed to load topic policies service " + className, e);
+        }
     }
 
     /**

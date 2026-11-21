@@ -40,13 +40,13 @@ public class MetadataStoreFactoryImpl {
 
     public static MetadataStore create(String metadataURL, MetadataStoreConfig metadataStoreConfig) throws
             MetadataStoreException {
-        return newInstance(metadataURL, metadataStoreConfig, false);
+        return create(metadataURL, metadataStoreConfig, false);
     }
 
     public static MetadataStoreExtended createExtended(String metadataURL, MetadataStoreConfig metadataStoreConfig)
             throws
             MetadataStoreException {
-        MetadataStore store = MetadataStoreFactoryImpl.newInstance(metadataURL, metadataStoreConfig, true);
+        MetadataStore store = create(metadataURL, metadataStoreConfig, true);
         if (!(store instanceof MetadataStoreExtended)) {
             throw new MetadataStoreException.InvalidImplementationException(
                     "Implementation does not comply with " + MetadataStoreExtended.class.getName());
@@ -55,8 +55,8 @@ public class MetadataStoreFactoryImpl {
         return (MetadataStoreExtended) store;
     }
 
-    private static MetadataStore newInstance(String metadataURL, MetadataStoreConfig metadataStoreConfig,
-                                             boolean enableSessionWatcher)
+    public static MetadataStore create(String metadataURL, MetadataStoreConfig metadataStoreConfig,
+                                       boolean enableSessionWatcher)
             throws MetadataStoreException {
         MetadataStoreProvider provider = findProvider(metadataURL);
         return provider.create(metadataURL, metadataStoreConfig, enableSessionWatcher);

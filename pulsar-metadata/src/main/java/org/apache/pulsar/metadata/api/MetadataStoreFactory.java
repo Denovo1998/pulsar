@@ -43,6 +43,12 @@ public class MetadataStoreFactory {
         return MetadataStoreFactoryImpl.create(metadataURL, metadataStoreConfig);
     }
 
+    /** Optionally request session events from providers that support them. */
+    public static MetadataStore create(String metadataURL, MetadataStoreConfig metadataStoreConfig,
+                                       boolean enableSessionWatcher) throws MetadataStoreException {
+        return MetadataStoreFactoryImpl.create(metadataURL, metadataStoreConfig, enableSessionWatcher);
+    }
+
     public static boolean isBasedOnZookeeper(String metadataURL) {
         return MetadataStoreFactoryImpl.isBasedOnZookeeper(metadataURL);
     }
