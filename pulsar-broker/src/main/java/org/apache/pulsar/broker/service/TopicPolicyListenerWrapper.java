@@ -51,7 +51,7 @@ import org.jspecify.annotations.Nullable;
  * </ul>
  * Afterwards every update is forwarded immediately. The wrapper is one-shot for a topic instance.
  */
-public class TopicPolicyListenerWrapper implements TopicPolicyListener {
+public class TopicPolicyListenerWrapper implements TopicPolicyListener.Scoped {
 
     private static final Logger LOG = Logger.get(TopicPolicyListenerWrapper.class);
     private static final long INITIALIZATION_WARNING_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
@@ -74,6 +74,14 @@ public class TopicPolicyListenerWrapper implements TopicPolicyListener {
         this.createdNanos = System.nanoTime();
     }
 
+    @Override
+    public void onPolicyAbsent(boolean global) {
+        // An empty policy clears just this level of the hierarchy, including during initialization.
+        TopicPolicies empty = new TopicPolicies();
+        empty.setIsGlobal(global);
+        onUpdate(empty);
+    }
+
     /**
      * Handles live updates. A live update supersedes the loaded policy of its scope.
      */
@@ -87,8 +95,7 @@ public class TopicPolicyListenerWrapper implements TopicPolicyListener {
         maybeLogWarning();
 
         if (data == null) {
-            // A delete does not carry the scope through the listener interface and removes the topic policies of
-            // both scopes, so it supersedes every buffered and loaded value: forward it and finish initialization.
+            // An unscoped delete supersedes both buffered and loaded values.
             initialized = true;
             latestLocalPolicies = null;
             latestGlobalPolicies = null;

@@ -27,4 +27,9 @@ import org.apache.pulsar.common.policies.data.TopicPolicies;
 public interface TopicPolicyListener {
 
   void onUpdate(TopicPolicies data);
+
+  /** A listener that can clear a single policy scope when its record is absent. */
+  interface Scoped extends TopicPolicyListener {
+      void onPolicyAbsent(boolean global);
+  }
 }

@@ -24,6 +24,7 @@ import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.pulsar.broker.auth.MockedPulsarServiceBaseTest;
 import org.apache.pulsar.common.naming.NamespaceName;
@@ -107,6 +108,21 @@ public class LegacyAwareTopicPoliciesServiceTest extends MockedPulsarServiceBase
         assertEquals(admin.topicPolicies().getCompactionThreshold(topic1), 1);
         // The policies will be lost because they are not stored in the __change_events topic
         assertNull(admin.topicPolicies().getCompactionThreshold(topic2));
+    }
+
+    @Test
+    public void testMetadataStoreServiceHonorsLegacyRegistrationOverride() throws Exception {
+        try (var service = new MetadataStoreTopicPoliciesService() {
+            @Deprecated
+            @Override
+            public boolean registerListener(TopicName topic, TopicPolicyListener listener) {
+                return false;
+            }
+        }) {
+            service.start(pulsar);
+            assertFalse(service.registerListenerAsync(TopicName.get(metaNamespace + "/declined"), policy -> {})
+                    .get(10, TimeUnit.SECONDS));
+        }
     }
 
     @DataProvider

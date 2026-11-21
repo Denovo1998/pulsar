@@ -115,6 +115,19 @@ public class TopicPolicyListenerWrapperTest {
     }
 
     @Test
+    public void shouldPreserveLoadedGlobalPoliciesWhenLocalPoliciesAreDeletedDuringInitialization() {
+        RecordingListener real = new RecordingListener();
+        TopicPolicyListenerWrapper wrapper = new TopicPolicyListenerWrapper(real, TOPIC);
+        TopicPolicies loadedLocal = TopicPolicies.builder().messageTTLInSeconds(10).build();
+        TopicPolicies loadedGlobal = TopicPolicies.builder().isGlobal(true).messageTTLInSeconds(60).build();
+
+        wrapper.onPolicyAbsent(false);
+        wrapper.completeInitialization(loadedGlobal, loadedLocal);
+
+        assertThat(real.updates).containsExactly(localPolicies(), loadedGlobal);
+    }
+
+    @Test
     public void shouldForwardPerScopeUpdatesAfterDeleteBeforeInitialization() {
         RecordingListener real = new RecordingListener();
         TopicPolicyListenerWrapper wrapper = new TopicPolicyListenerWrapper(real, TOPIC);

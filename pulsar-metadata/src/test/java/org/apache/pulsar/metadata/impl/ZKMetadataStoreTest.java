@@ -26,19 +26,24 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.commons.lang3.function.FailableRunnable;
 import org.apache.pulsar.metadata.TestZKServer;
 import org.apache.pulsar.metadata.api.MetadataStore;
 import org.apache.pulsar.metadata.api.MetadataStoreConfig;
 import org.apache.pulsar.metadata.api.MetadataStoreException;
 import org.apache.pulsar.metadata.api.Option.VerifyPublication;
 import org.apache.pulsar.metadata.api.Stat;
+import org.apache.pulsar.metadata.api.extended.MetadataStoreExtended;
+import org.apache.pulsar.metadata.api.extended.SessionEvent;
 import org.apache.zookeeper.AsyncCallback.DataCallback;
 import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.AsyncCallback.StatCallback;
@@ -51,6 +56,48 @@ import org.apache.zookeeper.ZooKeeper;
 import org.testng.annotations.Test;
 
 public class ZKMetadataStoreTest {
+
+    public static void withDisconnectedSession(MetadataStoreExtended store, String url, boolean expire,
+                                               FailableRunnable<Exception> action) throws Exception {
+        ZooKeeper reader = ((ZKMetadataStore) ((DualMetadataStore) store).getSourceStore()).getZkClient();
+        // updateServerList belongs to the underlying ZooKeeper handle. A session expiration replaces it.
+        ZooKeeper current = reader instanceof PulsarZooKeeperClient client
+                ? Objects.requireNonNullElse(client.getZooKeeperHandle(), reader) : reader;
+        String connectString = url.substring("zk:".length());
+        long sessionId = reader.getSessionId();
+        var disconnected = new CompletableFuture<Void>();
+        var reconnected = new CompletableFuture<Void>();
+        Runnable unregister = store.registerCancellableSessionListener(event -> {
+            if (event == SessionEvent.ConnectionLost) {
+                disconnected.complete(null);
+            } else if (event == (expire ? SessionEvent.SessionReestablished : SessionEvent.Reconnected)) {
+                reconnected.complete(null);
+            }
+        });
+        try {
+            try (ServerSocket unavailable = new ServerSocket(0)) {
+                // Move only the broker's client to an endpoint that never completes a ZooKeeper handshake.
+                current.updateServerList("127.0.0.1:" + unavailable.getLocalPort());
+                try {
+                    disconnected.get(10, TimeUnit.SECONDS);
+                    action.run();
+                    if (expire) {
+                        // Closing a second client attached to the same session expires it on the server.
+                        try (ZooKeeper sameSession = new ZooKeeper(connectString, reader.getSessionTimeout(),
+                                event -> {}, sessionId, reader.getSessionPasswd())) {
+                            sameSession.exists("/", false);
+                        }
+                    }
+                } finally {
+                    current.updateServerList(connectString);
+                }
+            }
+            reconnected.get(20, TimeUnit.SECONDS);
+            assertThat(reader.getSessionId() != sessionId).isEqualTo(expire);
+        } finally {
+            unregister.run();
+        }
+    }
 
     private record Value(String id, String payload) {
         Value(String payload) {
